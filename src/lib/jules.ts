@@ -46,12 +46,13 @@ export class JulesClient {
     return this.fetch(`/sessions/${id}`);
   }
 
-  async createSession(sourceName: string, prompt: string) {
+  async createSession(sourceName: string, prompt: string, title?: string) {
     return this.fetch('/sessions', {
       method: 'POST',
       body: JSON.stringify({
         source: sourceName,
         prompt: prompt,
+        title: title || prompt.substring(0, 30),
       }),
     });
   }

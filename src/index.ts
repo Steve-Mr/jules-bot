@@ -4,11 +4,15 @@ import { Env, JulesClient } from './lib/jules';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Helper to format plan
+// Helper to format plan (if available in activity description or other fields)
 function formatPlan(activities: any[]): string {
-    const planActivity = activities.find(a => a.type === 'PLAN_GENERATED' || a.description?.toLowerCase().includes('plan'));
+    const planActivity = activities.find(a =>
+        a.type === 'PLAN_GENERATED' ||
+        (a.description && a.description.toLowerCase().includes('plan')) ||
+        (a.summary && a.summary.toLowerCase().includes('plan'))
+    );
     if (!planActivity) return 'Check details on GitHub or Jules web app.';
-    return planActivity.description || 'Plan generated, please review.';
+    return planActivity.description || planActivity.summary || 'Plan generated, please review.';
 }
 
 // Scheduled task for notifications
@@ -17,7 +21,7 @@ export async function handleScheduled(env: Env) {
 
   const bot = new Bot(env.TELEGRAM_TOKEN);
   const jules = new JulesClient(env.JULES_API_KEY);
-  const adminId = env.ADMIN_USER_ID.split(',')[0]; // Notify the first admin
+  const adminId = env.ADMIN_USER_ID.split(',')[0];
 
   try {
     const { sessions } = await jules.listSessions();
@@ -29,21 +33,20 @@ export async function handleScheduled(env: Env) {
       if (!activities || activities.length === 0) continue;
 
       const lastActivity = activities[activities.length - 1];
-      const lastActivityId = lastActivity.name; // Use unique resource name as ID
+      const lastActivityId = lastActivity.name;
 
       const storedId = await env.JULES_NOTIFICATIONS_KV.get(`last_notified:${sessionId}`);
 
       if (storedId !== lastActivityId) {
-        // New activity!
-        // We only notify for significant milestones to avoid spam
         const significantTypes = ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED', 'REQUIRE_USER_APPROVAL'];
         const isSignificant = significantTypes.includes(lastActivity.type) || session.state === 'REQUIRE_USER_APPROVAL';
 
         if (isSignificant) {
+          const activityDesc = lastActivity.description || lastActivity.summary || lastActivity.type || 'New progress';
           await bot.api.sendMessage(adminId,
-            `🔔 **Update for Session \`${sessionId}\`**\n\n` +
+            `🔔 **Update for Session \`${session.title || session.displayName || sessionId}\`**\n\n` +
             `**Status:** \`${session.state}\`\n` +
-            `**New Activity:** ${lastActivity.description || lastActivity.type}\n\n` +
+            `**New Activity:** ${activityDesc}\n\n` +
             `Use /sessions to manage.`,
             { parse_mode: 'Markdown' }
           );
@@ -82,7 +85,8 @@ app.post('/webhook', async (c) => {
       const keyboard = new InlineKeyboard();
       sessions.slice(0, 10).forEach((s: any) => {
         const id = s.name.split('/').pop();
-        keyboard.text(`📝 ${s.displayName || id}`, `view:${id}`).row();
+        const label = s.title || s.displayName || id;
+        keyboard.text(`📝 ${label}`, `view:${id}`).row();
       });
       await ctx.reply('Recent Sessions:', { reply_markup: keyboard });
     } catch (e: any) {
@@ -116,6 +120,7 @@ app.post('/webhook', async (c) => {
       try {
         const session = await jules.getSession(id);
         const status = session.state || 'UNKNOWN';
+        const title = session.title || session.displayName || id;
         const keyboard = new InlineKeyboard()
           .text('🔄 Refresh', `view:${id}`)
           .text('📋 Activities', `activities:${id}`).row()
@@ -124,7 +129,7 @@ app.post('/webhook', async (c) => {
           .text('🔙 Back to List', 'sessions_back');
 
         await ctx.editMessageText(
-          `**Session:** ${session.displayName || id}\n**Status:** \`${status}\`\n**Source:** \`${session.source}\``,
+          `**Session:** ${title}\n**Status:** \`${status}\`\n**Source:** \`${session.source}\``,
           { parse_mode: 'Markdown', reply_markup: keyboard }
         );
       } catch (e: any) {
@@ -135,7 +140,8 @@ app.post('/webhook', async (c) => {
         const keyboard = new InlineKeyboard();
         sessions.slice(0, 10).forEach((s: any) => {
           const id = s.name.split('/').pop();
-          keyboard.text(`📝 ${s.displayName || id}`, `view:${id}`).row();
+          const label = s.title || s.displayName || id;
+          keyboard.text(`📝 ${label}`, `view:${id}`).row();
         });
         await ctx.editMessageText('Recent Sessions:', { reply_markup: keyboard });
     } else if (action === 'plan_view') {
@@ -174,7 +180,9 @@ app.post('/webhook', async (c) => {
         const { activities } = await jules.getActivities(id);
         const lastFive = activities.slice(-5).reverse().map((a: any) => {
             const time = new Date(a.createTime).toLocaleTimeString();
-            return `[${time}] **${a.type}**: ${a.description || ''}`;
+            const type = a.type || a.name?.split('/').pop() || 'ACTIVITY';
+            const content = a.description || a.summary || a.text || '(No details available)';
+            return `[${time}] **${type}**: ${content}`;
         }).join('\n');
         await ctx.reply(`Recent activities for \`${id}\`:\n\n${lastFive || 'No activities found.'}`, { parse_mode: 'Markdown' });
       } catch (e: any) {
@@ -211,7 +219,6 @@ app.post('/webhook', async (c) => {
     }
   });
 
-  // Use std/http adapter to be compatible with Hono's c.req.raw (Web Standards Request)
   return webhookCallback(bot, 'std/http')(c.req.raw);
 });
 
