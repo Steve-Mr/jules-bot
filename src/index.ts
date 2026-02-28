@@ -11,21 +11,31 @@ function getSummary(activity: any): string {
     if (activity.prompt) return activity.prompt;
     if (activity.text) return activity.text;
     if (activity.status?.message) return activity.status.message;
-
-    // Fallback: look for common nested fields in specific activity types
     if (activity.userRequest?.prompt) return activity.userRequest.prompt;
     if (activity.agentResponse?.text) return activity.agentResponse.text;
+    if (activity.progressUpdated?.description) return activity.progressUpdated.description;
+    if (activity.progressUpdated?.title) return activity.progressUpdated.title;
+    if (activity.userMessaged?.userMessage) return activity.userMessaged.userMessage;
+    if (activity.agentMessaged?.agentMessage) return activity.agentMessaged.agentMessage;
+    if (activity.sessionFailed?.reason) return activity.sessionFailed.reason;
 
     return '(No details available)';
 }
 
 function formatPlan(activities: any[]): string {
     const planActivity = activities.find(a =>
-        a.type === 'PLAN_GENERATED' ||
+        a.type === 'PLAN_GENERATED' || a.planGenerated ||
         (a.description && a.description.toLowerCase().includes('plan')) ||
         (a.summary && a.summary.toLowerCase().includes('plan'))
     );
     if (!planActivity) return 'Check details on GitHub or Jules web app.';
+
+    // Attempt to extract plan steps if available
+    const plan = planActivity.planGenerated?.plan;
+    if (plan && plan.steps) {
+        return plan.steps.map((s: any) => `${s.index + 1}. ${s.title}: ${s.description}`).join('\n');
+    }
+
     return getSummary(planActivity);
 }
 
@@ -46,8 +56,10 @@ export async function handleScheduled(env: Env) {
       const lastActivityId = lastActivity.name;
       const storedId = await env.JULES_NOTIFICATIONS_KV.get(`last_notified:${sessionId}`);
       if (storedId !== lastActivityId) {
-        const significantTypes = ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED', 'REQUIRE_USER_APPROVAL'];
-        const isSignificant = significantTypes.includes(lastActivity.type) || session.state === 'REQUIRE_USER_APPROVAL';
+        const significantTypes = ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED', 'AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'];
+        const isSignificant = significantTypes.includes(lastActivity.type) ||
+                              session.state === 'AWAITING_PLAN_APPROVAL' ||
+                              session.state === 'AWAITING_USER_FEEDBACK';
         if (isSignificant) {
           const activityDesc = getSummary(lastActivity);
           await bot.api.sendMessage(adminId,
@@ -117,11 +129,9 @@ app.post('/webhook', async (c) => {
     }
   });
 
-  // Handle direct replies to Bot messages
   bot.on('message:text', async (ctx) => {
     if (ctx.message.reply_to_message) {
       const replyTo = ctx.message.reply_to_message;
-      // Extract Session ID from ID pattern in the message text: `ID: 12345` or `Session: 12345`
       const text = replyTo.text || replyTo.caption || '';
       const sessionIdMatch = text.match(/(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
 
@@ -137,7 +147,6 @@ app.post('/webhook', async (c) => {
         }
       }
     }
-    // Fallback for non-reply text messages
     if (!ctx.message.text.startsWith('/')) {
         await ctx.reply('Type /help to see available commands. To reply to a session, use the "Reply" feature on a session message.');
     }
@@ -160,7 +169,7 @@ app.post('/webhook', async (c) => {
           .text('🔙 Back to List', 'sessions_back');
 
         await ctx.editMessageText(
-          `**Session:** ${title}\n**ID:** \`${id}\`\n**Status:** \`${status}\`\n**Source:** \`${session.source}\`\n\n💡 _Tip: Reply to this message to send a chat to Jules._`,
+          `**Session:** ${title}\n**ID:** \`${id}\`\n**Status:** \`${status}\`\n**Source:** \`${session.sourceContext?.source || session.source || 'Unknown'}\`\n\n💡 _Tip: Reply to this message to send a chat to Jules._`,
           { parse_mode: 'Markdown', reply_markup: keyboard }
         );
       } catch (e: any) {
@@ -181,11 +190,11 @@ app.post('/webhook', async (c) => {
         const { activities } = await jules.getActivities(id);
         const planText = formatPlan(activities);
         const keyboard = new InlineKeyboard();
-        if (session.state === 'REQUIRE_USER_APPROVAL') {
+        if (session.state === 'AWAITING_PLAN_APPROVAL') {
             keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
         }
         keyboard.text('⬅️ Back', `view:${id}`);
-        await ctx.editMessageText(`📋 **Plan Details:**\n\n${planText}\n\n**ID:** \`${id}\`\n${session.state === 'REQUIRE_USER_APPROVAL' ? '⚠️ Approval Required!' : ''}`, {
+        await ctx.editMessageText(`📋 **Plan Details:**\n\n${planText}\n\n**ID:** \`${id}\`\n${session.state === 'AWAITING_PLAN_APPROVAL' ? '⚠️ Approval Required!' : ''}`, {
             parse_mode: 'Markdown',
             reply_markup: keyboard
         });

@@ -47,18 +47,24 @@ export class JulesClient {
   }
 
   async createSession(sourceName: string, prompt: string, title?: string) {
+    // Aligned with Jules REST API v1alpha documentation
     return this.fetch('/sessions', {
       method: 'POST',
       body: JSON.stringify({
-        source: sourceName,
         prompt: prompt,
         title: title || prompt.substring(0, 30),
+        sourceContext: {
+          source: sourceName,
+          githubRepoContext: {
+            startingBranch: 'main'
+          }
+        }
       }),
     });
   }
 
   async sendMessage(sessionId: string, message: string) {
-    // Jules API v1alpha sendMessage expected payload field is 'prompt'
+    // Aligned with Jules REST API v1alpha documentation
     return this.fetch(`/sessions/${sessionId}:sendMessage`, {
       method: 'POST',
       body: JSON.stringify({ prompt: message }),
@@ -66,6 +72,7 @@ export class JulesClient {
   }
 
   async approvePlan(sessionId: string) {
+    // Aligned with Jules REST API v1alpha documentation
     return this.fetch(`/sessions/${sessionId}:approvePlan`, {
       method: 'POST',
     });
