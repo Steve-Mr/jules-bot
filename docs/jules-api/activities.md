@@ -87,25 +87,115 @@ curl -H "x-goog-api-key: $JULES_API_KEY" \
   https://jules.googleapis.com/v1alpha/sessions/1234567/activities/act2
 ```
 
-### Response
+## Activity Types
 
-Returns the full [Activity](types.md#activity) object:
+Activities have different types based on what occurred. Each activity will have exactly one of these event fields populated:
+
+### Plan Generated
+
+Indicates Jules has created a plan for the task:
 
 ```json
 {
-  "name": "sessions/1234567/activities/act2",
-  "id": "act2",
-  "originator": "agent",
-  "description": "Code changes ready",
-  "createTime": "2024-01-15T11:00:00Z",
+  "planGenerated": {
+    "plan": {
+      "id": "plan1",
+      "steps": [
+        { "id": "step1", "index": 0, "title": "Step title", "description": "Details" }
+      ],
+      "createTime": "2024-01-15T10:31:00Z"
+    }
+  }
+}
+```
+
+### Plan Approved
+
+Indicates a plan was approved (by user or auto-approved):
+
+```json
+{
+  "planApproved": {
+    "planId": "plan1"
+  }
+}
+```
+
+### User Messaged
+
+A message from the user:
+
+```json
+{
+  "userMessaged": {
+    "userMessage": "Please also add integration tests"
+  }
+}
+```
+
+### Agent Messaged
+
+A message from Jules:
+
+```json
+{
+  "agentMessaged": {
+    "agentMessage": "I've completed the unit tests. Would you like me to add integration tests as well?"
+  }
+}
+```
+
+### Progress Updated
+
+A status update during execution:
+
+```json
+{
+  "progressUpdated": {
+    "title": "Writing tests",
+    "description": "Creating test cases for login functionality"
+  }
+}
+```
+
+### Session Completed
+
+The session finished successfully:
+
+```json
+{
+  "sessionCompleted": {}
+}
+```
+
+### Session Failed
+
+The session encountered an error:
+
+```json
+{
+  "sessionFailed": {
+    "reason": "Unable to install dependencies"
+  }
+}
+```
+
+## Artifacts
+
+Activities may include artifacts produced during execution:
+
+### Code Changes (ChangeSet)
+
+```json
+{
   "artifacts": [
     {
       "changeSet": {
         "source": "sources/github-myorg-myrepo",
         "gitPatch": {
-          "baseCommitId": "a1b2c3d4",
-          "unidiffPatch": "diff --git a/tests/auth.test.js...",
-          "suggestedCommitMessage": "Add unit tests for authentication module"
+          "baseCommitId": "a1b2c3d4e5f6",
+          "unidiffPatch": "diff --git a/src/auth.js b/src/auth.js\n...",
+          "suggestedCommitMessage": "Add authentication tests"
         }
       }
     }
@@ -113,25 +203,8 @@ Returns the full [Activity](types.md#activity) object:
 }
 ```
 
-## Activity Types
+### Bash Output
 
-Activities have different types based on what occurred. Each activity will have exactly one of these event fields populated:
-
-- **Plan Generated**: Indicates Jules has created a plan for the task.
-- **Plan Approved**: Indicates a plan was approved.
-- **User Messaged**: A message from the user.
-- **Agent Messaged**: A message from Jules.
-- **Progress Updated**: A status update during execution.
-- **Session Completed**: The session finished successfully.
-- **Session Failed**: The session encountered an error.
-
-## Artifacts
-
-Activities may include artifacts produced during execution:
-
-- **Code Changes (ChangeSet)**: Unified diff patch and suggested commit message.
-- **Bash Output**: Output from a bash command (stdout, stderr, exit code).
-- **Media**: Media file produced (e.g. image/png).
 ```json
 {
   "artifacts": [
@@ -140,6 +213,21 @@ Activities may include artifacts produced during execution:
         "command": "npm test",
         "output": "All tests passed (42 passing)",
         "exitCode": 0
+      }
+    }
+  ]
+}
+```
+
+### Media
+
+```json
+{
+  "artifacts": [
+    {
+      "media": {
+        "mimeType": "image/png",
+        "data": "base64-encoded-data..."
       }
     }
   ]
