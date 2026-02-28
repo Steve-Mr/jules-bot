@@ -58,9 +58,10 @@ export class JulesClient {
   }
 
   async sendMessage(sessionId: string, message: string) {
+    // Jules API v1alpha sendMessage expected payload field is 'prompt'
     return this.fetch(`/sessions/${sessionId}:sendMessage`, {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ prompt: message }),
     });
   }
 

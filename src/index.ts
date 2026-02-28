@@ -4,7 +4,21 @@ import { Env, JulesClient } from './lib/jules';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Helper to format plan (if available in activity description or other fields)
+// Recursive search for a human-readable summary in a Jules Activity object
+function getSummary(activity: any): string {
+    if (activity.description) return activity.description;
+    if (activity.summary) return activity.summary;
+    if (activity.prompt) return activity.prompt;
+    if (activity.text) return activity.text;
+    if (activity.status?.message) return activity.status.message;
+
+    // Fallback: look for common nested fields in specific activity types
+    if (activity.userRequest?.prompt) return activity.userRequest.prompt;
+    if (activity.agentResponse?.text) return activity.agentResponse.text;
+
+    return '(No details available)';
+}
+
 function formatPlan(activities: any[]): string {
     const planActivity = activities.find(a =>
         a.type === 'PLAN_GENERATED' ||
@@ -12,13 +26,11 @@ function formatPlan(activities: any[]): string {
         (a.summary && a.summary.toLowerCase().includes('plan'))
     );
     if (!planActivity) return 'Check details on GitHub or Jules web app.';
-    return planActivity.description || planActivity.summary || 'Plan generated, please review.';
+    return getSummary(planActivity);
 }
 
-// Scheduled task for notifications
 export async function handleScheduled(env: Env) {
   if (!env.JULES_NOTIFICATIONS_KV || !env.TELEGRAM_TOKEN || !env.ADMIN_USER_ID) return;
-
   const bot = new Bot(env.TELEGRAM_TOKEN);
   const jules = new JulesClient(env.JULES_API_KEY);
   const adminId = env.ADMIN_USER_ID.split(',')[0];
@@ -26,23 +38,18 @@ export async function handleScheduled(env: Env) {
   try {
     const { sessions } = await jules.listSessions();
     if (!sessions) return;
-
     for (const session of sessions) {
       const sessionId = session.name.split('/').pop();
       const { activities } = await jules.getActivities(sessionId);
       if (!activities || activities.length === 0) continue;
-
       const lastActivity = activities[activities.length - 1];
       const lastActivityId = lastActivity.name;
-
       const storedId = await env.JULES_NOTIFICATIONS_KV.get(`last_notified:${sessionId}`);
-
       if (storedId !== lastActivityId) {
         const significantTypes = ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED', 'REQUIRE_USER_APPROVAL'];
         const isSignificant = significantTypes.includes(lastActivity.type) || session.state === 'REQUIRE_USER_APPROVAL';
-
         if (isSignificant) {
-          const activityDesc = lastActivity.description || lastActivity.summary || lastActivity.type || 'New progress';
+          const activityDesc = getSummary(lastActivity);
           await bot.api.sendMessage(adminId,
             `🔔 **Update for Session \`${session.title || session.displayName || sessionId}\`**\n\n` +
             `**Status:** \`${session.state}\`\n` +
@@ -51,7 +58,6 @@ export async function handleScheduled(env: Env) {
             { parse_mode: 'Markdown' }
           );
         }
-
         await env.JULES_NOTIFICATIONS_KV.put(`last_notified:${sessionId}`, lastActivityId);
       }
     }
@@ -111,6 +117,32 @@ app.post('/webhook', async (c) => {
     }
   });
 
+  // Handle direct replies to Bot messages
+  bot.on('message:text', async (ctx) => {
+    if (ctx.message.reply_to_message) {
+      const replyTo = ctx.message.reply_to_message;
+      // Extract Session ID from ID pattern in the message text: `ID: 12345` or `Session: 12345`
+      const text = replyTo.text || replyTo.caption || '';
+      const sessionIdMatch = text.match(/(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
+
+      if (sessionIdMatch) {
+        const sessionId = sessionIdMatch[1];
+        try {
+          await jules.sendMessage(sessionId, ctx.message.text);
+          await ctx.reply(`✅ Replied to session \`${sessionId}\`.`, { reply_to_message_id: ctx.message.message_id });
+          return;
+        } catch (e: any) {
+          await ctx.reply(`❌ Failed to send reply: ${e.message}`);
+          return;
+        }
+      }
+    }
+    // Fallback for non-reply text messages
+    if (!ctx.message.text.startsWith('/')) {
+        await ctx.reply('Type /help to see available commands. To reply to a session, use the "Reply" feature on a session message.');
+    }
+  });
+
   bot.on('callback_query:data', async (ctx) => {
     const data = ctx.callbackQuery.data;
     const [action, ...args] = data.split(':');
@@ -124,12 +156,11 @@ app.post('/webhook', async (c) => {
         const keyboard = new InlineKeyboard()
           .text('🔄 Refresh', `view:${id}`)
           .text('📋 Activities', `activities:${id}`).row()
-          .text('💬 Send Message', `msg_hint:${id}`)
           .text('✅ View/Approve Plan', `plan_view:${id}`).row()
           .text('🔙 Back to List', 'sessions_back');
 
         await ctx.editMessageText(
-          `**Session:** ${title}\n**Status:** \`${status}\`\n**Source:** \`${session.source}\``,
+          `**Session:** ${title}\n**ID:** \`${id}\`\n**Status:** \`${status}\`\n**Source:** \`${session.source}\`\n\n💡 _Tip: Reply to this message to send a chat to Jules._`,
           { parse_mode: 'Markdown', reply_markup: keyboard }
         );
       } catch (e: any) {
@@ -149,14 +180,12 @@ app.post('/webhook', async (c) => {
         const session = await jules.getSession(id);
         const { activities } = await jules.getActivities(id);
         const planText = formatPlan(activities);
-
         const keyboard = new InlineKeyboard();
         if (session.state === 'REQUIRE_USER_APPROVAL') {
             keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
         }
         keyboard.text('⬅️ Back', `view:${id}`);
-
-        await ctx.editMessageText(`📋 **Plan Details:**\n\n${planText}\n\n${session.state === 'REQUIRE_USER_APPROVAL' ? '⚠️ Approval Required!' : ''}`, {
+        await ctx.editMessageText(`📋 **Plan Details:**\n\n${planText}\n\n**ID:** \`${id}\`\n${session.state === 'REQUIRE_USER_APPROVAL' ? '⚠️ Approval Required!' : ''}`, {
             parse_mode: 'Markdown',
             reply_markup: keyboard
         });
@@ -170,20 +199,17 @@ app.post('/webhook', async (c) => {
         } catch (e: any) {
             await ctx.answerCallbackQuery(`Error: ${e.message}`);
         }
-    } else if (action === 'msg_hint') {
-        await ctx.reply(`To send a message to this session, use:\n\`/reply ${id} Your message here\``, { parse_mode: 'Markdown' });
-        await ctx.answerCallbackQuery();
     } else if (action === 'create_select') {
       await ctx.editMessageText(`Source selected: \`${id}\`\n\nTo start, send:\n\`/start_session ${id} Your prompt\``, { parse_mode: 'Markdown' });
     } else if (action === 'activities') {
       try {
         const { activities } = await jules.getActivities(id);
-        const lastFive = activities.slice(-5).reverse().map((a: any) => {
+        const lastFive = activities.slice(-8).reverse().map((a: any) => {
             const time = new Date(a.createTime).toLocaleTimeString();
             const type = a.type || a.name?.split('/').pop() || 'ACTIVITY';
-            const content = a.description || a.summary || a.text || '(No details available)';
+            const content = getSummary(a);
             return `[${time}] **${type}**: ${content}`;
-        }).join('\n');
+        }).join('\n\n');
         await ctx.reply(`Recent activities for \`${id}\`:\n\n${lastFive || 'No activities found.'}`, { parse_mode: 'Markdown' });
       } catch (e: any) {
         await ctx.answerCallbackQuery(`Error: ${e.message}`);
@@ -222,7 +248,6 @@ app.post('/webhook', async (c) => {
   return webhookCallback(bot, 'std/http')(c.req.raw);
 });
 
-// Cloudflare Workers Entry
 export default {
   fetch: app.fetch,
   scheduled: (event: any, env: Env, ctx: any) => {
