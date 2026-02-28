@@ -211,7 +211,8 @@ app.post('/webhook', async (c) => {
     }
   });
 
-  return webhookCallback(bot, 'cloudflare-workers')(c.req.raw);
+  // Use std/http adapter to be compatible with Hono's c.req.raw (Web Standards Request)
+  return webhookCallback(bot, 'std/http')(c.req.raw);
 });
 
 // Cloudflare Workers Entry

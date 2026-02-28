@@ -16,3 +16,8 @@ compatibility_date = "2024-03-01"
 # Optional: Cron trigger for checking notifications (every 5 minutes)
 # [triggers]
 # crons = ["*/5 * * * *"]
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true
