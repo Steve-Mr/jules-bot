@@ -64,7 +64,6 @@ export async function handleScheduled(env: Env) {
       if (!activities || activities.length === 0) continue;
 
       const lastActivity = activities[activities.length - 1];
-      // Skip progress updates in notifications to avoid spam
       if (lastActivity.type === 'PROGRESS_UPDATED') continue;
 
       const lastActivityId = lastActivity.name;
@@ -170,7 +169,7 @@ app.post('/webhook', async (c) => {
     const data = ctx.callbackQuery.data;
     const [action, ...args] = data.split(':');
     const id = args[0]; // sessionId
-    const subId = args[1]; // activityId
+    const subId = args[1]; // index or activityId
 
     if (action === 'view') {
       try {
@@ -202,46 +201,50 @@ app.post('/webhook', async (c) => {
     } else if (action === 'activities') {
         try {
           const { activities } = await jules.getActivities(id);
-          // Filter out technical noise
+          // Filter to remove technical noise
           const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
           const keyboard = new InlineKeyboard();
 
           let listText = `Recent activities for \`${id}\`:\n\n`;
-          filtered.slice(-8).reverse().forEach((a: any) => {
-              const aid = a.name.split('/').pop();
+          // We show last 5 only for the list to keep callback_data compact
+          const itemsToShow = filtered.slice(-5).reverse();
+          itemsToShow.forEach((a: any, idx: number) => {
               const time = new Date(a.createTime).toLocaleTimeString();
-              const type = a.type || a.name?.split('/').pop() || 'ACTIVITY';
+              const type = a.type || 'ACTIVITY';
               const summary = getSummary(a, false);
               listText += `🕒 ${time} **${type}**\n${summary}\n\n`;
-              keyboard.text(`🔍 Details: ${type}`, `act_view:${id}:${aid}`).row();
+              // COMPRESSION: Use the original index in the 'filtered' array (relative to end)
+              const originalIndex = filtered.length - 1 - idx;
+              keyboard.text(`🔍 Details: ${type}`, `act_idx:${id}:${originalIndex}`).row();
           });
           keyboard.text('🔙 Back', `view:${id}`);
 
-          // Telegram message length check for the list
           if (listText.length > 4000) listText = listText.substring(0, 3900) + '... (List truncated)';
 
           await ctx.editMessageText(listText, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: any) {
           await ctx.answerCallbackQuery(`Error: ${e.message}`);
         }
-    } else if (action === 'act_view') {
+    } else if (action === 'act_idx') {
         try {
-            // Jules doesn't have a direct "getActivity" by ID in some versions, but we can fetch list and find
             const { activities } = await jules.getActivities(id);
-            const activity = activities.find((a: any) => a.name.endsWith(subId));
-            if (!activity) return ctx.answerCallbackQuery('Activity not found.');
+            const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
+            const index = parseInt(subId);
+            const activity = filtered[index];
+
+            if (!activity) return ctx.answerCallbackQuery('Activity details expired or not found.');
 
             const time = new Date(activity.createTime).toLocaleString();
-            const fullContent = `**Activity Detail**\n\n**ID:** \`${id}\`\n**Time:** ${time}\n**Type:** ${activity.type}\n\n${getSummary(activity, true)}`;
+            const fullContent = `**Activity Detail**\n\n**Session ID:** \`${id}\`\n**Time:** ${time}\n**Type:** ${activity.type}\n\n${getSummary(activity, true)}`;
 
             const keyboard = new InlineKeyboard().text('🔙 Back to List', `activities:${id}`);
 
             if (fullContent.length <= 4000) {
                 await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
             } else {
-                await ctx.answerCallbackQuery('Detail is very long, sending in multiple messages...');
+                await ctx.answerCallbackQuery('Content too long, sending in chunks...');
                 await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
-                await ctx.reply('^ Full activity details above.', { reply_markup: keyboard });
+                await ctx.reply('^ Full details above.', { reply_markup: keyboard });
             }
         } catch (e: any) {
             await ctx.answerCallbackQuery(`Error: ${e.message}`);
