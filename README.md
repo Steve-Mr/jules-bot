@@ -8,7 +8,7 @@
 - **详尽监控**：过滤技术噪音，提供清晰的活动流与 Plan 审批界面。
 
 ## 快速开始
-1. **部署**：参考 [README_DEPLOY.md](README.md) 进行 Cloudflare Workers 部署。
+1. **部署**：参考 [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md) 进行 Cloudflare Workers 部署。
 2. **操作**：阅读 [USER_GUIDE.md](USER_GUIDE.md) 了解如何玩转这个 Bot。
 
 ## 开发者参考
