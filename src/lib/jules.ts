@@ -54,7 +54,6 @@ export class JulesClient {
   }
 
   async createSession(sourceName: string, prompt: string, options: CreateSessionOptions = {}) {
-    // Aligned with Jules REST API v1alpha documentation
     return this.fetch('/sessions', {
       method: 'POST',
       body: JSON.stringify({
@@ -73,7 +72,6 @@ export class JulesClient {
   }
 
   async sendMessage(sessionId: string, message: string) {
-    // Aligned with Jules REST API v1alpha documentation
     return this.fetch(`/sessions/${sessionId}:sendMessage`, {
       method: 'POST',
       body: JSON.stringify({ prompt: message }),
@@ -81,13 +79,32 @@ export class JulesClient {
   }
 
   async approvePlan(sessionId: string) {
-    // Aligned with Jules REST API v1alpha documentation
     return this.fetch(`/sessions/${sessionId}:approvePlan`, {
       method: 'POST',
     });
   }
 
-  async getActivities(sessionId: string) {
-    return this.fetch(`/sessions/${sessionId}/activities`);
+  async getActivities(sessionId: string, pageToken?: string) {
+    const path = `/sessions/${sessionId}/activities?pageSize=50${pageToken ? `&pageToken=${pageToken}` : ''}`;
+    return this.fetch(path);
+  }
+
+  /**
+   * Helper to get ALL activities by following tokens
+   */
+  async getAllActivities(sessionId: string) {
+      let all: any[] = [];
+      let token: string | undefined = undefined;
+
+      // Limit to 5 pages (250 activities) to prevent timeout in worker
+      for (let i = 0; i < 5; i++) {
+          const res = await this.getActivities(sessionId, token);
+          if (res.activities) {
+              all = all.concat(res.activities);
+          }
+          token = res.nextPageToken;
+          if (!token) break;
+      }
+      return { activities: all };
   }
 }

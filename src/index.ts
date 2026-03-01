@@ -12,32 +12,44 @@ async function sendLongMessage(bot: Bot, chatId: string | number, text: string, 
     }
 }
 
+// Map technical types to user-friendly labels
+function getFriendlyType(type: string): string {
+    const map: Record<string, string> = {
+        'PLAN_GENERATED': '📋 Plan Generated',
+        'PLAN_APPROVED': '✅ Plan Approved',
+        'USER_MESSAGED': '👤 Your Message',
+        'AGENT_MESSAGED': '🤖 Jules Message',
+        'SESSION_COMPLETED': '🎉 Task Completed',
+        'SESSION_FAILED': '❌ Task Failed',
+        'AWAITING_PLAN_APPROVAL': '⚠️ Waiting for Approval',
+        'AWAITING_USER_FEEDBACK': '❓ Waiting for Feedback'
+    };
+    return map[type] || type || 'ACTIVITY';
+}
+
 // Recursive search for a human-readable summary in a Jules Activity object
 function getSummary(activity: any, verbose = true): string {
     let raw = '';
-    if (activity.description) raw = activity.description;
+    if (activity.agentMessaged?.agentMessage) raw = activity.agentMessaged.agentMessage;
+    else if (activity.userMessaged?.userMessage) raw = activity.userMessaged.userMessage;
+    else if (activity.planGenerated?.plan) raw = `Plan with ${activity.planGenerated.plan.steps?.length || 0} steps ready.`;
+    else if (activity.description) raw = activity.description;
     else if (activity.summary) raw = activity.summary;
-    else if (activity.prompt) raw = activity.prompt;
-    else if (activity.text) raw = activity.text;
     else if (activity.status?.message) raw = activity.status.message;
     else if (activity.userRequest?.prompt) raw = activity.userRequest.prompt;
     else if (activity.agentResponse?.text) raw = activity.agentResponse.text;
     else if (activity.progressUpdated?.description) raw = activity.progressUpdated.description;
-    else if (activity.progressUpdated?.title) raw = activity.progressUpdated.title;
-    else if (activity.userMessaged?.userMessage) raw = activity.userMessaged.userMessage;
-    else if (activity.agentMessaged?.agentMessage) raw = activity.agentMessaged.agentMessage;
     else if (activity.sessionFailed?.reason) raw = activity.sessionFailed.reason;
     else raw = '(No details available)';
 
-    if (!verbose && raw.length > 50) return raw.substring(0, 47) + '...';
+    if (!verbose && raw.length > 60) return raw.substring(0, 57) + '...';
     return raw;
 }
 
 function formatPlan(activities: any[]): string {
     const planActivity = activities.find(a =>
         a.type === 'PLAN_GENERATED' || a.planGenerated ||
-        (a.description && a.description.toLowerCase().includes('plan')) ||
-        (a.summary && a.summary.toLowerCase().includes('plan'))
+        (a.description && a.description.toLowerCase().includes('plan'))
     );
     if (!planActivity) return 'Check details on GitHub or Jules web app.';
 
@@ -60,7 +72,8 @@ export async function handleScheduled(env: Env) {
     if (!sessions) return;
     for (const session of sessions) {
       const sessionId = session.name.split('/').pop();
-      const { activities } = await jules.getActivities(sessionId);
+      // FIX: Use getAllActivities to ensure we see the latest page
+      const { activities } = await jules.getAllActivities(sessionId);
       if (!activities || activities.length === 0) continue;
 
       const lastActivity = activities[activities.length - 1];
@@ -78,7 +91,7 @@ export async function handleScheduled(env: Env) {
           await bot.api.sendMessage(adminId,
             `🔔 **Update for Session \`${session.title || session.displayName || sessionId}\`**\n\n` +
             `**Status:** \`${session.state}\`\n` +
-            `**New Activity:** ${activityDesc}\n\n` +
+            `**New Activity:** ${getFriendlyType(lastActivity.type)}\n${activityDesc}\n\n` +
             `Use /sessions to manage.`,
             { parse_mode: 'Markdown' }
           );
@@ -105,7 +118,38 @@ app.post('/webhook', async (c) => {
     }
   });
 
-  bot.command('start', (ctx) => ctx.reply('👋 Hello! I am your Jules Bot.\n\n/sessions - List active sessions\n/new - Start a new session'));
+  bot.command('start', (ctx) => ctx.reply('👋 Hello! I am your Jules Bot.\n\n/sessions - List active sessions\n/new - Start a new session\n/check - Check configuration'));
+
+  bot.command('check', async (ctx) => {
+      let report = "🛠 **System Check**\n\n";
+
+      // 1. Env check
+      report += `✅ Admin ID: \`${ctx.from?.id}\` (In whitelist)\n`;
+      report += `✅ API Key: ${c.env.JULES_API_KEY ? 'Configured' : '❌ MISSING'}\n`;
+      report += `✅ Bot Token: ${c.env.TELEGRAM_TOKEN ? 'Configured' : '❌ MISSING'}\n`;
+
+      // 2. KV Check
+      if (c.env.JULES_NOTIFICATIONS_KV) {
+          try {
+              await c.env.JULES_NOTIFICATIONS_KV.put('test_key', 'test_val');
+              report += `✅ KV Storage: Working\n`;
+          } catch (e: any) {
+              report += `❌ KV Storage: Failed (${e.message})\n`;
+          }
+      } else {
+          report += `ℹ️ KV Storage: Not bound (Notifications disabled)\n`;
+      }
+
+      // 3. Jules Connectivity
+      try {
+          await jules.listSources();
+          report += `✅ Jules API: Connected\n`;
+      } catch (e: any) {
+          report += `❌ Jules API: Connection failed (${e.message})\n`;
+      }
+
+      await ctx.reply(report, { parse_mode: 'Markdown' });
+  });
 
   bot.command('sessions', async (ctx) => {
     try {
@@ -161,7 +205,7 @@ app.post('/webhook', async (c) => {
       }
     }
     if (!ctx.message.text.startsWith('/')) {
-        await ctx.reply('Type /help to see available commands. To reply to a session, use the "Reply" feature on a session message.');
+        await ctx.reply('To reply to a session, use the "Reply" feature on a session message.');
     }
   });
 
@@ -200,45 +244,41 @@ app.post('/webhook', async (c) => {
         await ctx.editMessageText('Recent Sessions:', { reply_markup: keyboard });
     } else if (action === 'activities') {
         try {
-          const { activities } = await jules.getActivities(id);
+          // FIX: Use getAllActivities to get latest page
+          const { activities } = await jules.getAllActivities(id);
           const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
           const keyboard = new InlineKeyboard();
 
-          let listText = `Recent activities for \`${id}\`:\n\n`;
+          let listText = `**Recent Activities** (Latest first)\nSession: \`${id}\`\n\n`;
           const itemsToShow = filtered.slice(-5).reverse();
           itemsToShow.forEach((a: any, idx: number) => {
               const time = new Date(a.createTime).toLocaleTimeString();
-              const type = a.type || 'ACTIVITY';
+              const typeLabel = getFriendlyType(a.type);
               const summary = getSummary(a, false);
-              listText += `🕒 ${time} **${type}**\n${summary}\n\n`;
+              listText += `🕒 ${time} **${typeLabel}**\n${summary}\n\n`;
               const originalIndex = filtered.length - 1 - idx;
-              keyboard.text(`🔍 Details: ${type}`, `act_idx:${id}:${originalIndex}`).row();
+              keyboard.text(`🔍 Details: ${a.type || 'Activity'}`, `act_idx:${id}:${originalIndex}`).row();
           });
           keyboard.text('🔙 Back', `view:${id}`);
 
-          if (listText.length > 4000) listText = listText.substring(0, 3900) + '... (List truncated)';
+          if (listText.length > 4000) listText = listText.substring(0, 3900) + '...';
           await ctx.editMessageText(listText, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: any) {
           await ctx.answerCallbackQuery(`Error: ${e.message}`);
         }
     } else if (action === 'act_idx') {
         try {
-            const { activities } = await jules.getActivities(id);
+            const { activities } = await jules.getAllActivities(id);
             const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
             const index = parseInt(subId);
             const activity = filtered[index];
-
-            if (!activity) return ctx.answerCallbackQuery('Activity expired.');
-
+            if (!activity) return ctx.answerCallbackQuery('Expired.');
             const time = new Date(activity.createTime).toLocaleString();
-            const fullContent = `**Activity Detail**\n\n**Session ID:** \`${id}\`\n**Time:** ${time}\n**Type:** ${activity.type}\n\n${getSummary(activity, true)}`;
-
+            const fullContent = `**Activity Detail**\n\n**Session ID:** \`${id}\`\n**Time:** ${time}\n**Type:** ${getFriendlyType(activity.type)}\n\n${getSummary(activity, true)}`;
             const keyboard = new InlineKeyboard().text('🔙 Back to List', `activities:${id}`);
-
             if (fullContent.length <= 4000) {
                 await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
             } else {
-                await ctx.answerCallbackQuery('Long content...');
                 await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
                 await ctx.reply('^ Full details above.', { reply_markup: keyboard });
             }
@@ -248,7 +288,7 @@ app.post('/webhook', async (c) => {
     } else if (action === 'plan_view') {
       try {
         const session = await jules.getSession(id);
-        const { activities } = await jules.getActivities(id);
+        const { activities } = await jules.getAllActivities(id);
         const planText = formatPlan(activities);
         const keyboard = new InlineKeyboard();
         if (session.state === 'AWAITING_PLAN_APPROVAL') {
@@ -274,7 +314,7 @@ app.post('/webhook', async (c) => {
             await ctx.answerCallbackQuery(`Error: ${e.message}`);
         }
     } else if (action === 'create_select') {
-      await ctx.editMessageText(`Source selected: \`${id}\`\n\nTo start, send:\n\`/start_session ${id} [Options] Your prompt\`\n\n**Available Options:**\n- \`-b [branch]\`: Specify branch\n- \`-i\`: Interactive (require plan approval)\n- \`-a\`: Auto create PR\n- \`-t [title]\`: Set session title\n\n**Example:**\n\`/start_session ${id} -i -b develop Fix layout issues\``, { parse_mode: 'Markdown' });
+      await ctx.editMessageText(`Source selected: \`${id}\`\n\nTo start, send:\n\`/start_session ${id} [Options] Your prompt\``, { parse_mode: 'Markdown' });
     }
     await ctx.answerCallbackQuery();
   });
@@ -292,45 +332,32 @@ app.post('/webhook', async (c) => {
     }
   });
 
-  // Handle advanced /start_session
   bot.command('start_session', async (ctx) => {
     const text = ctx.message?.text || '';
     const parts = text.split(/\s+/);
     if (parts.length < 3) return ctx.reply('Usage: /start_session [source] [options] [prompt]');
-
     const sourceName = parts[1];
     let promptParts: string[] = [];
     const options: CreateSessionOptions = {};
-
     for (let i = 2; i < parts.length; i++) {
         const p = parts[i];
-        if (p === '-i' || p === '--interactive') {
-            options.requirePlanApproval = true;
-        } else if (p === '-a' || p === '--auto-pr') {
-            options.automationMode = 'AUTO_CREATE_PR';
-        } else if (p === '-b' || p === '--branch') {
-            options.startingBranch = parts[++i];
-        } else if (p === '-t' || p === '--title') {
-            // Collect title words until next flag or end
+        if (p === '-i' || p === '--interactive') options.requirePlanApproval = true;
+        else if (p === '-a' || p === '--auto-pr') options.automationMode = 'AUTO_CREATE_PR';
+        else if (p === '-b' || p === '--branch') options.startingBranch = parts[++i];
+        else if (p === '-t' || p === '--title') {
             let titleParts = [];
-            while (i + 1 < parts.length && !parts[i+1].startsWith('-')) {
-                titleParts.push(parts[++i]);
-            }
+            while (i + 1 < parts.length && !parts[i+1].startsWith('-')) titleParts.push(parts[++i]);
             options.title = titleParts.join(' ');
-        } else {
-            promptParts.push(p);
-        }
+        } else promptParts.push(p);
     }
-
     const prompt = promptParts.join(' ');
     if (!prompt) return ctx.reply('Please provide a prompt.');
-
     try {
       const session = await jules.createSession(sourceName, prompt, options);
       const sessionId = session.name.split('/').pop();
       await ctx.reply(`🚀 Session started! ID: \`${sessionId}\`\nMode: ${options.requirePlanApproval ? 'Interactive' : 'Auto'}\nBranch: ${options.startingBranch || 'main'}`, { parse_mode: 'Markdown' });
     } catch (e: any) {
-      await ctx.reply(`❌ Failed to start: ${e.message}`);
+      await ctx.reply(`❌ Failed: ${e.message}`);
     }
   });
 
