@@ -4,22 +4,33 @@ import { Env, JulesClient } from './lib/jules';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Recursive search for a human-readable summary in a Jules Activity object
-function getSummary(activity: any): string {
-    if (activity.description) return activity.description;
-    if (activity.summary) return activity.summary;
-    if (activity.prompt) return activity.prompt;
-    if (activity.text) return activity.text;
-    if (activity.status?.message) return activity.status.message;
-    if (activity.userRequest?.prompt) return activity.userRequest.prompt;
-    if (activity.agentResponse?.text) return activity.agentResponse.text;
-    if (activity.progressUpdated?.description) return activity.progressUpdated.description;
-    if (activity.progressUpdated?.title) return activity.progressUpdated.title;
-    if (activity.userMessaged?.userMessage) return activity.userMessaged.userMessage;
-    if (activity.agentMessaged?.agentMessage) return activity.agentMessaged.agentMessage;
-    if (activity.sessionFailed?.reason) return activity.sessionFailed.reason;
+// Helper to safely split and send long messages
+async function sendLongMessage(bot: Bot, chatId: string | number, text: string, options: any = {}) {
+    const CHUNK_SIZE = 4000;
+    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+        await bot.api.sendMessage(chatId, text.substring(i, i + CHUNK_SIZE), options);
+    }
+}
 
-    return '(No details available)';
+// Recursive search for a human-readable summary in a Jules Activity object
+function getSummary(activity: any, verbose = true): string {
+    let raw = '';
+    if (activity.description) raw = activity.description;
+    else if (activity.summary) raw = activity.summary;
+    else if (activity.prompt) raw = activity.prompt;
+    else if (activity.text) raw = activity.text;
+    else if (activity.status?.message) raw = activity.status.message;
+    else if (activity.userRequest?.prompt) raw = activity.userRequest.prompt;
+    else if (activity.agentResponse?.text) raw = activity.agentResponse.text;
+    else if (activity.progressUpdated?.description) raw = activity.progressUpdated.description;
+    else if (activity.progressUpdated?.title) raw = activity.progressUpdated.title;
+    else if (activity.userMessaged?.userMessage) raw = activity.userMessaged.userMessage;
+    else if (activity.agentMessaged?.agentMessage) raw = activity.agentMessaged.agentMessage;
+    else if (activity.sessionFailed?.reason) raw = activity.sessionFailed.reason;
+    else raw = '(No details available)';
+
+    if (!verbose && raw.length > 50) return raw.substring(0, 47) + '...';
+    return raw;
 }
 
 function formatPlan(activities: any[]): string {
@@ -30,7 +41,6 @@ function formatPlan(activities: any[]): string {
     );
     if (!planActivity) return 'Check details on GitHub or Jules web app.';
 
-    // Attempt to extract plan steps if available
     const plan = planActivity.planGenerated?.plan;
     if (plan && plan.steps) {
         return plan.steps.map((s: any) => `${s.index + 1}. ${s.title}: ${s.description}`).join('\n');
@@ -52,7 +62,11 @@ export async function handleScheduled(env: Env) {
       const sessionId = session.name.split('/').pop();
       const { activities } = await jules.getActivities(sessionId);
       if (!activities || activities.length === 0) continue;
+
       const lastActivity = activities[activities.length - 1];
+      // Skip progress updates in notifications to avoid spam
+      if (lastActivity.type === 'PROGRESS_UPDATED') continue;
+
       const lastActivityId = lastActivity.name;
       const storedId = await env.JULES_NOTIFICATIONS_KV.get(`last_notified:${sessionId}`);
       if (storedId !== lastActivityId) {
@@ -155,7 +169,8 @@ app.post('/webhook', async (c) => {
   bot.on('callback_query:data', async (ctx) => {
     const data = ctx.callbackQuery.data;
     const [action, ...args] = data.split(':');
-    const id = args.join(':');
+    const id = args[0]; // sessionId
+    const subId = args[1]; // activityId
 
     if (action === 'view') {
       try {
@@ -179,11 +194,58 @@ app.post('/webhook', async (c) => {
         const { sessions } = await jules.listSessions();
         const keyboard = new InlineKeyboard();
         sessions.slice(0, 10).forEach((s: any) => {
-          const id = s.name.split('/').pop();
-          const label = s.title || s.displayName || id;
-          keyboard.text(`📝 ${label}`, `view:${id}`).row();
+          const sid = s.name.split('/').pop();
+          const label = s.title || s.displayName || sid;
+          keyboard.text(`📝 ${label}`, `view:${sid}`).row();
         });
         await ctx.editMessageText('Recent Sessions:', { reply_markup: keyboard });
+    } else if (action === 'activities') {
+        try {
+          const { activities } = await jules.getActivities(id);
+          // Filter out technical noise
+          const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
+          const keyboard = new InlineKeyboard();
+
+          let listText = `Recent activities for \`${id}\`:\n\n`;
+          filtered.slice(-8).reverse().forEach((a: any) => {
+              const aid = a.name.split('/').pop();
+              const time = new Date(a.createTime).toLocaleTimeString();
+              const type = a.type || a.name?.split('/').pop() || 'ACTIVITY';
+              const summary = getSummary(a, false);
+              listText += `🕒 ${time} **${type}**\n${summary}\n\n`;
+              keyboard.text(`🔍 Details: ${type}`, `act_view:${id}:${aid}`).row();
+          });
+          keyboard.text('🔙 Back', `view:${id}`);
+
+          // Telegram message length check for the list
+          if (listText.length > 4000) listText = listText.substring(0, 3900) + '... (List truncated)';
+
+          await ctx.editMessageText(listText, { parse_mode: 'Markdown', reply_markup: keyboard });
+        } catch (e: any) {
+          await ctx.answerCallbackQuery(`Error: ${e.message}`);
+        }
+    } else if (action === 'act_view') {
+        try {
+            // Jules doesn't have a direct "getActivity" by ID in some versions, but we can fetch list and find
+            const { activities } = await jules.getActivities(id);
+            const activity = activities.find((a: any) => a.name.endsWith(subId));
+            if (!activity) return ctx.answerCallbackQuery('Activity not found.');
+
+            const time = new Date(activity.createTime).toLocaleString();
+            const fullContent = `**Activity Detail**\n\n**ID:** \`${id}\`\n**Time:** ${time}\n**Type:** ${activity.type}\n\n${getSummary(activity, true)}`;
+
+            const keyboard = new InlineKeyboard().text('🔙 Back to List', `activities:${id}`);
+
+            if (fullContent.length <= 4000) {
+                await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
+            } else {
+                await ctx.answerCallbackQuery('Detail is very long, sending in multiple messages...');
+                await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
+                await ctx.reply('^ Full activity details above.', { reply_markup: keyboard });
+            }
+        } catch (e: any) {
+            await ctx.answerCallbackQuery(`Error: ${e.message}`);
+        }
     } else if (action === 'plan_view') {
       try {
         const session = await jules.getSession(id);
@@ -194,10 +256,16 @@ app.post('/webhook', async (c) => {
             keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
         }
         keyboard.text('⬅️ Back', `view:${id}`);
-        await ctx.editMessageText(`📋 **Plan Details:**\n\n${planText}\n\n**ID:** \`${id}\`\n${session.state === 'AWAITING_PLAN_APPROVAL' ? '⚠️ Approval Required!' : ''}`, {
-            parse_mode: 'Markdown',
-            reply_markup: keyboard
-        });
+
+        const header = `📋 **Plan Details:**\n\n**ID:** \`${id}\`\n${session.state === 'AWAITING_PLAN_APPROVAL' ? '⚠️ Approval Required!' : ''}\n\n`;
+        const fullContent = header + planText;
+
+        if (fullContent.length <= 4000) {
+            await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
+        } else {
+            await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
+            await ctx.reply('^ Plan details above.', { reply_markup: keyboard });
+        }
       } catch (e: any) {
         await ctx.answerCallbackQuery(`Error: ${e.message}`);
       }
@@ -210,19 +278,6 @@ app.post('/webhook', async (c) => {
         }
     } else if (action === 'create_select') {
       await ctx.editMessageText(`Source selected: \`${id}\`\n\nTo start, send:\n\`/start_session ${id} Your prompt\``, { parse_mode: 'Markdown' });
-    } else if (action === 'activities') {
-      try {
-        const { activities } = await jules.getActivities(id);
-        const lastFive = activities.slice(-8).reverse().map((a: any) => {
-            const time = new Date(a.createTime).toLocaleTimeString();
-            const type = a.type || a.name?.split('/').pop() || 'ACTIVITY';
-            const content = getSummary(a);
-            return `[${time}] **${type}**: ${content}`;
-        }).join('\n\n');
-        await ctx.reply(`Recent activities for \`${id}\`:\n\n${lastFive || 'No activities found.'}`, { parse_mode: 'Markdown' });
-      } catch (e: any) {
-        await ctx.answerCallbackQuery(`Error: ${e.message}`);
-      }
     }
     await ctx.answerCallbackQuery();
   });
