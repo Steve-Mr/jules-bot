@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { Bot, webhookCallback, InlineKeyboard } from 'grammy';
-import { Env, JulesClient } from './lib/jules';
+import { Env, JulesClient, CreateSessionOptions } from './lib/jules';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -169,7 +169,7 @@ app.post('/webhook', async (c) => {
     const data = ctx.callbackQuery.data;
     const [action, ...args] = data.split(':');
     const id = args[0]; // sessionId
-    const subId = args[1]; // index or activityId
+    const subId = args[1]; // index
 
     if (action === 'view') {
       try {
@@ -201,26 +201,22 @@ app.post('/webhook', async (c) => {
     } else if (action === 'activities') {
         try {
           const { activities } = await jules.getActivities(id);
-          // Filter to remove technical noise
           const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
           const keyboard = new InlineKeyboard();
 
           let listText = `Recent activities for \`${id}\`:\n\n`;
-          // We show last 5 only for the list to keep callback_data compact
           const itemsToShow = filtered.slice(-5).reverse();
           itemsToShow.forEach((a: any, idx: number) => {
               const time = new Date(a.createTime).toLocaleTimeString();
               const type = a.type || 'ACTIVITY';
               const summary = getSummary(a, false);
               listText += `🕒 ${time} **${type}**\n${summary}\n\n`;
-              // COMPRESSION: Use the original index in the 'filtered' array (relative to end)
               const originalIndex = filtered.length - 1 - idx;
               keyboard.text(`🔍 Details: ${type}`, `act_idx:${id}:${originalIndex}`).row();
           });
           keyboard.text('🔙 Back', `view:${id}`);
 
           if (listText.length > 4000) listText = listText.substring(0, 3900) + '... (List truncated)';
-
           await ctx.editMessageText(listText, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: any) {
           await ctx.answerCallbackQuery(`Error: ${e.message}`);
@@ -232,7 +228,7 @@ app.post('/webhook', async (c) => {
             const index = parseInt(subId);
             const activity = filtered[index];
 
-            if (!activity) return ctx.answerCallbackQuery('Activity details expired or not found.');
+            if (!activity) return ctx.answerCallbackQuery('Activity expired.');
 
             const time = new Date(activity.createTime).toLocaleString();
             const fullContent = `**Activity Detail**\n\n**Session ID:** \`${id}\`\n**Time:** ${time}\n**Type:** ${activity.type}\n\n${getSummary(activity, true)}`;
@@ -242,7 +238,7 @@ app.post('/webhook', async (c) => {
             if (fullContent.length <= 4000) {
                 await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
             } else {
-                await ctx.answerCallbackQuery('Content too long, sending in chunks...');
+                await ctx.answerCallbackQuery('Long content...');
                 await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
                 await ctx.reply('^ Full details above.', { reply_markup: keyboard });
             }
@@ -259,10 +255,8 @@ app.post('/webhook', async (c) => {
             keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
         }
         keyboard.text('⬅️ Back', `view:${id}`);
-
         const header = `📋 **Plan Details:**\n\n**ID:** \`${id}\`\n${session.state === 'AWAITING_PLAN_APPROVAL' ? '⚠️ Approval Required!' : ''}\n\n`;
         const fullContent = header + planText;
-
         if (fullContent.length <= 4000) {
             await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
         } else {
@@ -275,12 +269,12 @@ app.post('/webhook', async (c) => {
     } else if (action === 'approve_do') {
         try {
             await jules.approvePlan(id);
-            await ctx.editMessageText(`✅ Plan approved for session \`${id}\`. Jules is back to work!`, { parse_mode: 'Markdown' });
+            await ctx.editMessageText(`✅ Plan approved for session \`${id}\`.`, { parse_mode: 'Markdown' });
         } catch (e: any) {
             await ctx.answerCallbackQuery(`Error: ${e.message}`);
         }
     } else if (action === 'create_select') {
-      await ctx.editMessageText(`Source selected: \`${id}\`\n\nTo start, send:\n\`/start_session ${id} Your prompt\``, { parse_mode: 'Markdown' });
+      await ctx.editMessageText(`Source selected: \`${id}\`\n\nTo start, send:\n\`/start_session ${id} [Options] Your prompt\`\n\n**Available Options:**\n- \`-b [branch]\`: Specify branch\n- \`-i\`: Interactive (require plan approval)\n- \`-a\`: Auto create PR\n- \`-t [title]\`: Set session title\n\n**Example:**\n\`/start_session ${id} -i -b develop Fix layout issues\``, { parse_mode: 'Markdown' });
     }
     await ctx.answerCallbackQuery();
   });
@@ -292,23 +286,51 @@ app.post('/webhook', async (c) => {
     const [, sessionId, message] = match;
     try {
       await jules.sendMessage(sessionId, message);
-      await ctx.reply(`✅ Message sent to session \`${sessionId}\`.`);
+      await ctx.reply(`✅ Message sent to \`${sessionId}\`.`);
     } catch (e: any) {
-      await ctx.reply(`❌ Failed to send message: ${e.message}`);
+      await ctx.reply(`❌ Failed: ${e.message}`);
     }
   });
 
+  // Handle advanced /start_session
   bot.command('start_session', async (ctx) => {
     const text = ctx.message?.text || '';
-    const match = text.match(/\/start_session\s+([^\s]+)\s+(.+)/);
-    if (!match) return ctx.reply('Usage: /start_session [source_name] [prompt]');
-    const [, sourceName, prompt] = match;
+    const parts = text.split(/\s+/);
+    if (parts.length < 3) return ctx.reply('Usage: /start_session [source] [options] [prompt]');
+
+    const sourceName = parts[1];
+    let promptParts: string[] = [];
+    const options: CreateSessionOptions = {};
+
+    for (let i = 2; i < parts.length; i++) {
+        const p = parts[i];
+        if (p === '-i' || p === '--interactive') {
+            options.requirePlanApproval = true;
+        } else if (p === '-a' || p === '--auto-pr') {
+            options.automationMode = 'AUTO_CREATE_PR';
+        } else if (p === '-b' || p === '--branch') {
+            options.startingBranch = parts[++i];
+        } else if (p === '-t' || p === '--title') {
+            // Collect title words until next flag or end
+            let titleParts = [];
+            while (i + 1 < parts.length && !parts[i+1].startsWith('-')) {
+                titleParts.push(parts[++i]);
+            }
+            options.title = titleParts.join(' ');
+        } else {
+            promptParts.push(p);
+        }
+    }
+
+    const prompt = promptParts.join(' ');
+    if (!prompt) return ctx.reply('Please provide a prompt.');
+
     try {
-      const session = await jules.createSession(sourceName, prompt);
+      const session = await jules.createSession(sourceName, prompt, options);
       const sessionId = session.name.split('/').pop();
-      await ctx.reply(`🚀 Session started! ID: \`${sessionId}\``, { parse_mode: 'Markdown' });
+      await ctx.reply(`🚀 Session started! ID: \`${sessionId}\`\nMode: ${options.requirePlanApproval ? 'Interactive' : 'Auto'}\nBranch: ${options.startingBranch || 'main'}`, { parse_mode: 'Markdown' });
     } catch (e: any) {
-      await ctx.reply(`❌ Failed to start session: ${e.message}`);
+      await ctx.reply(`❌ Failed to start: ${e.message}`);
     }
   });
 

@@ -7,6 +7,13 @@ export interface Env {
   JULES_NOTIFICATIONS_KV?: KVNamespace;
 }
 
+export interface CreateSessionOptions {
+  title?: string;
+  startingBranch?: string;
+  requirePlanApproval?: boolean;
+  automationMode?: 'AUTO_CREATE_PR' | 'AUTOMATION_MODE_UNSPECIFIED';
+}
+
 export class JulesClient {
   private baseUrl = 'https://jules.googleapis.com/v1alpha';
   private apiKey: string;
@@ -46,19 +53,21 @@ export class JulesClient {
     return this.fetch(`/sessions/${id}`);
   }
 
-  async createSession(sourceName: string, prompt: string, title?: string) {
+  async createSession(sourceName: string, prompt: string, options: CreateSessionOptions = {}) {
     // Aligned with Jules REST API v1alpha documentation
     return this.fetch('/sessions', {
       method: 'POST',
       body: JSON.stringify({
         prompt: prompt,
-        title: title || prompt.substring(0, 30),
+        title: options.title || prompt.substring(0, 30),
         sourceContext: {
           source: sourceName,
           githubRepoContext: {
-            startingBranch: 'main'
+            startingBranch: options.startingBranch || 'main'
           }
-        }
+        },
+        requirePlanApproval: options.requirePlanApproval ?? false,
+        automationMode: options.automationMode || 'AUTOMATION_MODE_UNSPECIFIED'
       }),
     });
   }
