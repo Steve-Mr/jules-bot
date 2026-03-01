@@ -8,69 +8,60 @@
 
 在开始部署之前，请收集以下必要信息：
 
-1.  **Telegram Bot Token**：
-    - 在 Telegram 中联系 [@BotFather](https://t.me/botfather)。
-    - 使用 `/newbot` 创建机器人并获取 API Token。
-2.  **Jules API Key**：
-    - 访问 [Jules 网页版](https://jules.google/)。
-    - 进入 **Settings -> API Keys** 生成一个新的 Key。
-3.  **Telegram User ID**：
-    - 在 Telegram 中联系 [@userinfobot](https://t.me/userinfobot) 获取你的数字 ID。
-4.  **Cloudflare 账号**：
-    - 需要一个活跃的 Cloudflare 账号用于部署 Worker。
+1.  **Telegram Bot Token**：联系 [@BotFather](https://t.me/botfather) 获取。
+2.  **Jules API Key**：在 [Jules 网页版设置](https://jules.google/) 中生成。
+3.  **Telegram User ID**：联系 [@userinfobot](https://t.me/userinfobot) 获取你的数字 ID。
+4.  **Cloudflare 账号**：用于部署 Worker。
 
 ---
 
 ## 2. 部署方式
 
-### 方法 A：GitHub Actions 自动部署 (推荐)
+### 方法 A：GitHub Actions 自动部署 (推荐 🚀)
 
-这是最专业、最安全的方法，支持每当你提交代码时自动更新。
+这种方式支持在 GitHub 仓库中通过 Secrets 安全地管理所有私密信息。
 
-1.  **分叉 (Fork)** 或克隆本仓库到你的 GitHub。
+1.  **分叉 (Fork)** 本仓库。
 2.  **获取 Cloudflare API Token**：
-    - 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)。
-    - 进入 **My Profile -> API Tokens**。
-    - 点击 **Create Token**，使用 **Edit Cloudflare Workers** 模板。
-    - 复制生成的 Token。
-3.  **设置 GitHub Secrets**：
-    - 进入你的 GitHub 仓库 -> **Settings -> Secrets and variables -> Actions**。
-    - 点击 **New repository secret**。
-    - 名称：`CLOUDFLARE_API_TOKEN`，值：填入刚才复制的 Token。
-4.  **手动触发或提交代码**：
-    - 只要你向 `main` 分支推送代码，部署就会自动开始。
+    - 进入 Cloudflare **My Profile -> API Tokens**。
+    - 使用 **Edit Cloudflare Workers** 模板创建一个 Token。
+3.  **配置 GitHub Secrets**：
+    - 进入仓库 -> **Settings -> Secrets and variables -> Actions**。
+    - 添加以下必填项：
+        - `CLOUDFLARE_API_TOKEN`：你的 Cloudflare API 令牌。
+    - **(可选) 添加通知配置**（若定义，CI 会自动在部署时注入）：
+        - `JULES_KV_ID`：你的 Cloudflare KV 命名空间 ID。
+        - `JULES_CRON`：定时检查频率，例如 `*/5 * * * *`。
+4.  **触发部署**：向 `main` 分支提交代码。
 5.  **配置环境变量**：
-    - 第一次部署成功后，务必进入 Cloudflare Dashboard -> **Workers & Pages** -> 你的项目 -> **Settings -> Variables**。
+    - 在 Cloudflare Dashboard 找到你的项目 -> **Settings -> Variables**。
     - 手动添加 `TELEGRAM_TOKEN`, `JULES_API_KEY`, `ADMIN_USER_ID`。
 
 ---
 
 ### 方法 B：使用本地命令行部署
 
-1.  **安装依赖**：`npm install`
-2.  **登录**：`npx wrangler login`
-3.  **部署**：`npm run deploy`
+1.  `npm install`
+2.  `npx wrangler login`
+3.  `npm run deploy`
 4.  **配置 Webhook**：访问 `https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<DOMAIN>/webhook`。
 
 ---
 
-## 3. (可选) 开启主动通知与存储
+## 3. 进阶：配置主动通知
 
-为了让 Bot 记录通知历史并主动推送消息，你需要配置 KV 存储：
+为了让 Bot 能够主动推送任务进度，你需要：
 
-1.  **创建 KV 命名空间**：
-    - Cloudflare 控制台 -> **Workers & Pages -> KV**。
-    - 创建名为 `JULES_NOTIFICATIONS_KV` 的空间。
-2.  **在控制台绑定 (推荐)**：
-    - 进入 Worker -> **Settings -> Variables -> KV Namespace Bindings**。
-    - 绑定变量名 `JULES_NOTIFICATIONS_KV` 到刚才创建的空间。
-    - *注意：通过网页绑定不会被 GitHub 的自动部署冲掉。*
-3.  **设置定时器 (Cron)**：
-    - 进入 Worker -> **Settings -> Triggers**。
-    - 添加 Cron Trigger：`*/5 * * * *`。
+1.  **创建 KV**：在 Cloudflare Dashboard 创建一个 KV 命名空间，命名为 `JULES_NOTIFICATIONS_KV`。
+2.  **关联 ID**：
+    - **Actions 用户**：将得到的 ID 填入 GitHub Secret `JULES_KV_ID`。
+    - **命令行用户**：手动在 Cloudflare Dashboard 的 Worker 设置中绑定该 KV。
+3.  **设置定时器**：
+    - **Actions 用户**：设置 Secret `JULES_CRON`（如 `*/5 * * * *`）。
+    - **命令行用户**：在 Dashboard -> **Triggers** 手动添加。
 
 ---
 
-## 4. 验证部署
+## 4. 验证与诊断
 
-发送 `/start` 给你的 Bot。如果没反应，请运行 `/check` 进行系统诊断，查看哪些配置缺失。
+发送 `/start` 给你的 Bot。如果没反应，请运行 **`/check`** 命令。Bot 会列出当前的配置清单，并指出哪一项配置缺失或失败。
