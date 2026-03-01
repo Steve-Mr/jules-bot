@@ -21,62 +21,56 @@
 
 ---
 
-## 2. 部署步骤
+## 2. 部署方式
 
-### 方法 A：使用命令行部署 (推荐)
+### 方法 A：GitHub Actions 自动部署 (推荐)
 
-1.  **克隆/下载本项目**。
-2.  **安装依赖**：
-    ```bash
-    npm install
-    ```
-3.  **登录 Cloudflare**：
-    ```bash
-    npx wrangler login
-    ```
-4.  **修改配置 (可选)**：
-    编辑 `wrangler.toml` 文件，可以根据需要预填变量名或绑定 KV。
-5.  **一键部署**：
-    ```bash
-    npm run deploy
-    ```
-6.  **配置 Webhook**：
-    部署成功后，你会得到一个以 `.workers.dev` 结尾的 URL。请在浏览器中访问以下地址以激活 Bot：
-    `https://api.telegram.org/bot<你的BotToken>/setWebhook?url=https://<你的Worker域名>.workers.dev/webhook`
+这是最专业、最安全的方法，支持每当你提交代码时自动更新。
 
----
-
-### 方法 B：通过 Cloudflare Dashboard 手动部署
-
-1.  在 Cloudflare 控制台创建一个新的 **Worker**。
-2.  将 `src/index.ts` 和相关库文件的内容粘贴进去（或者使用 GitHub 关联自动构建）。
-3.  **关键：设置环境变量**：
-    进入 Worker 的 **Settings -> Variables**，添加以下三个 **Environment Variables**：
-    - `TELEGRAM_TOKEN`：你的 Bot Token。
-    - `JULES_API_KEY`：你的 Jules API Key。
-    - `ADMIN_USER_ID`：你的 Telegram ID（白名单）。
+1.  **分叉 (Fork)** 或克隆本仓库到你的 GitHub。
+2.  **获取 Cloudflare API Token**：
+    - 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)。
+    - 进入 **My Profile -> API Tokens**。
+    - 点击 **Create Token**，使用 **Edit Cloudflare Workers** 模板。
+    - 复制生成的 Token。
+3.  **设置 GitHub Secrets**：
+    - 进入你的 GitHub 仓库 -> **Settings -> Secrets and variables -> Actions**。
+    - 点击 **New repository secret**。
+    - 名称：`CLOUDFLARE_API_TOKEN`，值：填入刚才复制的 Token。
+4.  **手动触发或提交代码**：
+    - 只要你向 `main` 分支推送代码，部署就会自动开始。
+5.  **配置环境变量**：
+    - 第一次部署成功后，务必进入 Cloudflare Dashboard -> **Workers & Pages** -> 你的项目 -> **Settings -> Variables**。
+    - 手动添加 `TELEGRAM_TOKEN`, `JULES_API_KEY`, `ADMIN_USER_ID`。
 
 ---
 
-## 3. (可选) 开启主动通知功能
+### 方法 B：使用本地命令行部署
 
-如果你希望 Jules 完成任务时自动在 Telegram 弹窗提醒你，请执行以下操作：
+1.  **安装依赖**：`npm install`
+2.  **登录**：`npx wrangler login`
+3.  **部署**：`npm run deploy`
+4.  **配置 Webhook**：访问 `https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<DOMAIN>/webhook`。
 
-1.  **创建 KV 存储**：
-    - 在 Cloudflare 控制面板进入 **Workers & Pages -> KV**。
-    - 点击 **Create Namespace**，命名为 `JULES_NOTIFICATIONS_KV`。
-2.  **绑定 KV**：
-    - 进入你的 Worker -> **Settings -> Variables -> KV Namespace Bindings**。
-    - 点击 **Add Binding**。
-    - 变量名 (Variable name) 填：`JULES_NOTIFICATIONS_KV`。
-    - 空间 (KV namespace) 选你刚才创建的那一个。
-3.  **配置定时触发器 (Cron)**：
-    - 进入你的 Worker -> **Settings -> Triggers**。
-    - 点击 **Add Cron Trigger**。
-    - 表达式填：`*/5 * * * *` (代表每 5 分钟检查一次进度)。
+---
+
+## 3. (可选) 开启主动通知与存储
+
+为了让 Bot 记录通知历史并主动推送消息，你需要配置 KV 存储：
+
+1.  **创建 KV 命名空间**：
+    - Cloudflare 控制台 -> **Workers & Pages -> KV**。
+    - 创建名为 `JULES_NOTIFICATIONS_KV` 的空间。
+2.  **在控制台绑定 (推荐)**：
+    - 进入 Worker -> **Settings -> Variables -> KV Namespace Bindings**。
+    - 绑定变量名 `JULES_NOTIFICATIONS_KV` 到刚才创建的空间。
+    - *注意：通过网页绑定不会被 GitHub 的自动部署冲掉。*
+3.  **设置定时器 (Cron)**：
+    - 进入 Worker -> **Settings -> Triggers**。
+    - 添加 Cron Trigger：`*/5 * * * *`。
 
 ---
 
 ## 4. 验证部署
 
-部署完成后，在 Telegram 中给你的 Bot 发送 `/start`。如果收到欢迎信息，则说明部署成功！你可以接着运行 `/check` 进行全系统自检。
+发送 `/start` 给你的 Bot。如果没反应，请运行 `/check` 进行系统诊断，查看哪些配置缺失。
