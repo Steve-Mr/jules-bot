@@ -20,19 +20,21 @@ jobs:
 
       - name: Inject Secrets into wrangler.toml
         run: |
+          # Use | as delimiter for sed to avoid issues with / in Cron expressions
+
           # 1. Handle KV Namespace if secret exists
           if [ -n "${{ secrets.JULES_KV_ID }}" ]; then
             echo "Injecting KV ID..."
-            sed -i 's/# \[\[kv_namespaces\]\]/[[kv_namespaces]]/' wrangler.toml
-            sed -i 's/# binding = "JULES_NOTIFICATIONS_KV"/binding = "JULES_NOTIFICATIONS_KV"/' wrangler.toml
-            sed -i 's/# id = "__KV_ID__"/id = "${{ secrets.JULES_KV_ID }}"/' wrangler.toml
+            sed -i 's|# \[\[kv_namespaces\]\]|[[kv_namespaces]]|' wrangler.toml
+            sed -i 's|# binding = "JULES_NOTIFICATIONS_KV"|binding = "JULES_NOTIFICATIONS_KV"|' wrangler.toml
+            sed -i 's|# id = "__KV_ID__"|id = "${{ secrets.JULES_KV_ID }}"|' wrangler.toml
           fi
 
           # 2. Handle Cron Trigger if secret exists
           if [ -n "${{ secrets.JULES_CRON }}" ]; then
             echo "Injecting Cron Schedule..."
-            sed -i 's/# \[triggers\]/[triggers]/' wrangler.toml
-            sed -i 's/# crons = \["__CRON_SCHEDULE__"\]/crons = ["${{ secrets.JULES_CRON }}"]/' wrangler.toml
+            sed -i 's|# \[triggers\]|[triggers]|' wrangler.toml
+            sed -i 's|# crons = \["__CRON_SCHEDULE__"\]|crons = ["${{ secrets.JULES_CRON }}"]|' wrangler.toml
           fi
 
       - name: Deploy
