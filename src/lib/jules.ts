@@ -90,14 +90,12 @@ export class JulesClient {
   }
 
   /**
-   * Helper to get ALL activities by following tokens
+   * Limit to 3 pages to save resources and reduce latency
    */
   async getAllActivities(sessionId: string) {
       let all: any[] = [];
       let token: string | undefined = undefined;
-
-      // Limit to 5 pages (250 activities) to prevent timeout in worker
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 3; i++) {
           const res = await this.getActivities(sessionId, token);
           if (res.activities) {
               all = all.concat(res.activities);
