@@ -10,8 +10,11 @@
 
 1.  **Telegram Bot Token**：联系 [@BotFather](https://t.me/botfather) 获取。
 2.  **Jules API Key**：在 [Jules 网页版设置](https://jules.google/) 中生成。
-3.  **Telegram User ID**：联系 [@userinfobot](https://t.me/userinfobot) 获取你的数字 ID。
-4.  **Cloudflare 账号**：用于部署 Worker。
+3.  **Telegram User ID**：联系 [@userinfobot](https://t.me/userinfobot) 获取。
+4.  **Cloudflare Account ID**：
+    - 登录 Cloudflare 控制台。
+    - 进入 **Workers & Pages -> 概述**。
+    - 在页面右侧边栏可以找到 **Account ID**。
 
 ---
 
@@ -22,18 +25,16 @@
 这种方式支持在 GitHub 仓库中通过 Secrets 安全地管理所有私密信息。
 
 1.  **分叉 (Fork)** 本仓库。
-2.  **获取 Cloudflare API Token**：
-    - 进入 Cloudflare **My Profile -> API Tokens**。
-    - 使用 **Edit Cloudflare Workers** 模板创建一个 Token。
-3.  **配置 GitHub Secrets**：
+2.  **配置 GitHub Secrets**：
     - 进入仓库 -> **Settings -> Secrets and variables -> Actions**。
     - 添加以下必填项：
-        - `CLOUDFLARE_API_TOKEN`：你的 Cloudflare API 令牌。
-    - **(可选) 添加通知配置**（若定义，CI 会自动在部署时注入）：
+        - `CLOUDFLARE_API_TOKEN`：你的 Cloudflare API 令牌（需具备 Edit Workers 权限）。
+        - `CLOUDFLARE_ACCOUNT_ID`：你的 Cloudflare 账户 ID（见第 1 步）。
+    - **(可选) 添加通知配置**：
         - `JULES_KV_ID`：你的 Cloudflare KV 命名空间 ID。
         - `JULES_CRON`：定时检查频率，例如 `*/5 * * * *`。
-4.  **触发部署**：向 `main` 分支提交代码。
-5.  **配置环境变量**：
+3.  **触发部署**：向 `main` 分支提交代码。
+4.  **配置环境变量**：
     - 在 Cloudflare Dashboard 找到你的项目 -> **Settings -> Variables**。
     - 手动添加 `TELEGRAM_TOKEN`, `JULES_API_KEY`, `ADMIN_USER_ID`。
 
