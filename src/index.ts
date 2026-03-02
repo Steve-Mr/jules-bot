@@ -61,10 +61,6 @@ function formatPlan(activities: any[]): string {
   return getSummary(planActivity);
 }
 
-function getActivityKey(activity: any): string {
-  return (activity?.name || '').split('/').pop() || '';
-}
-
 export async function handleScheduled(env: Env) {
   if (!env.JULES_NOTIFICATIONS_KV || !env.TELEGRAM_TOKEN || !env.ADMIN_USER_ID) return;
   const bot = new Bot(env.TELEGRAM_TOKEN);
@@ -253,16 +249,26 @@ app.post('/webhook', async (c) => {
           const time = new Date(a.createTime).toLocaleTimeString();
           const typeLabel = getFriendlyType(a.type);
           const summary = getSummary(a, false);
-          const activityKey = getActivityKey(a);
+          const activityIndex = itemsToShow.indexOf(a);
           listText += `🕒 ${time} **${typeLabel}**\n${escapeMarkdown(summary)}\n\n`;
-          keyboard.text(`🔍 Details: ${a.type || 'Activity'}`, `act:${id}:${activityKey}`).row();
+          keyboard.text(`🔍 Details: ${a.type || 'Activity'}`, `act:${id}:${activityIndex}`).row();
         });
         keyboard.text('🔙 Back', `view:${id}`);
 
         if (listText.length > 4000) listText = `${listText.substring(0, 3900)}...`;
         await ctx.editMessageText(listText, { parse_mode: 'Markdown', reply_markup: keyboard });
       } else if (action === 'act') {
-        const activity = await jules.findActivityByKey(id, subId, 3);
+        const detailIndex = Number(subId);
+        if (Number.isNaN(detailIndex)) {
+          await ctx.answerCallbackQuery('Invalid activity index.');
+          return;
+        }
+        const { activities } = await jules.getRecentActivities(id, 40);
+        const filtered = activities
+          .filter((a: any) => a.type !== 'PROGRESS_UPDATED')
+          .sort((a: any, b: any) => new Date(b.createTime || 0).getTime() - new Date(a.createTime || 0).getTime())
+          .slice(0, 5);
+        const activity = filtered[detailIndex];
         if (!activity) {
           await ctx.answerCallbackQuery('Activity expired, please refresh.');
           return;
