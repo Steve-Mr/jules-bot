@@ -4,61 +4,61 @@ import { Env, JulesClient, CreateSessionOptions } from './lib/jules';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Helper to safely split and send long messages
 async function sendLongMessage(bot: Bot, chatId: string | number, text: string, options: any = {}) {
-    const CHUNK_SIZE = 4000;
-    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-        await bot.api.sendMessage(chatId, text.substring(i, i + CHUNK_SIZE), options);
-    }
+  const CHUNK_SIZE = 4000;
+  for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+    await bot.api.sendMessage(chatId, text.substring(i, i + CHUNK_SIZE), options);
+  }
 }
 
-// Map technical types to user-friendly labels
+function escapeMarkdown(text: string): string {
+  return text.replace(/([_\-*\[\]()~`>#+=|{}.!])/g, '\\$1');
+}
+
 function getFriendlyType(type: string): string {
-    const map: Record<string, string> = {
-        'PLAN_GENERATED': '📋 Plan Generated',
-        'PLAN_APPROVED': '✅ Plan Approved',
-        'USER_MESSAGED': '👤 Your Message',
-        'AGENT_MESSAGED': '🤖 Jules Message',
-        'SESSION_COMPLETED': '🎉 Task Completed',
-        'SESSION_FAILED': '❌ Task Failed',
-        'AWAITING_PLAN_APPROVAL': '⚠️ Waiting for Approval',
-        'AWAITING_USER_FEEDBACK': '❓ Waiting for Feedback'
-    };
-    return map[type] || type || 'ACTIVITY';
+  const map: Record<string, string> = {
+    PLAN_GENERATED: '📋 Plan Generated',
+    PLAN_APPROVED: '✅ Plan Approved',
+    USER_MESSAGED: '👤 Your Message',
+    AGENT_MESSAGED: '🤖 Jules Message',
+    SESSION_COMPLETED: '🎉 Task Completed',
+    SESSION_FAILED: '❌ Task Failed',
+    AWAITING_PLAN_APPROVAL: '⚠️ Waiting for Approval',
+    AWAITING_USER_FEEDBACK: '❓ Waiting for Feedback'
+  };
+  return map[type] || type || 'ACTIVITY';
 }
 
-// Recursive search for a human-readable summary in a Jules Activity object
 function getSummary(activity: any, verbose = true): string {
-    let raw = '';
-    if (activity.agentMessaged?.agentMessage) raw = activity.agentMessaged.agentMessage;
-    else if (activity.userMessaged?.userMessage) raw = activity.userMessaged.userMessage;
-    else if (activity.planGenerated?.plan) raw = `Plan with ${activity.planGenerated.plan.steps?.length || 0} steps ready.`;
-    else if (activity.description) raw = activity.description;
-    else if (activity.summary) raw = activity.summary;
-    else if (activity.status?.message) raw = activity.status.message;
-    else if (activity.userRequest?.prompt) raw = activity.userRequest.prompt;
-    else if (activity.agentResponse?.text) raw = activity.agentResponse.text;
-    else if (activity.progressUpdated?.description) raw = activity.progressUpdated.description;
-    else if (activity.sessionFailed?.reason) raw = activity.sessionFailed.reason;
-    else raw = '(No details available)';
+  let raw = '';
+  if (activity.agentMessaged?.agentMessage) raw = activity.agentMessaged.agentMessage;
+  else if (activity.userMessaged?.userMessage) raw = activity.userMessaged.userMessage;
+  else if (activity.planGenerated?.plan) raw = `Plan with ${activity.planGenerated.plan.steps?.length || 0} steps ready.`;
+  else if (activity.description) raw = activity.description;
+  else if (activity.summary) raw = activity.summary;
+  else if (activity.status?.message) raw = activity.status.message;
+  else if (activity.userRequest?.prompt) raw = activity.userRequest.prompt;
+  else if (activity.agentResponse?.text) raw = activity.agentResponse.text;
+  else if (activity.progressUpdated?.description) raw = activity.progressUpdated.description;
+  else if (activity.sessionFailed?.reason) raw = activity.sessionFailed.reason;
+  else raw = '(No details available)';
 
-    if (!verbose && raw.length > 60) return raw.substring(0, 57) + '...';
-    return raw;
+  if (!verbose && raw.length > 60) return `${raw.substring(0, 57)}...`;
+  return raw;
 }
 
 function formatPlan(activities: any[]): string {
-    const planActivity = activities.find(a =>
-        a.type === 'PLAN_GENERATED' || a.planGenerated ||
-        (a.description && a.description.toLowerCase().includes('plan'))
-    );
-    if (!planActivity) return 'Check details on GitHub or Jules web app.';
+  const planActivity = activities.find((a) =>
+    a.type === 'PLAN_GENERATED' || a.planGenerated || (a.description && a.description.toLowerCase().includes('plan'))
+  );
+  if (!planActivity) return 'Check details on GitHub or Jules web app.';
 
-    const plan = planActivity.planGenerated?.plan;
-    if (plan && plan.steps) {
-        return plan.steps.map((s: any) => `${s.index + 1}. ${s.title}: ${s.description}`).join('\n');
-    }
+  const plan = planActivity.planGenerated?.plan;
+  if (plan?.steps) {
+    return plan.steps.map((s: any) => `${s.index + 1}. ${s.title}: ${s.description}`).join('\n');
+  }
 
-    return getSummary(planActivity);
+  return getSummary(planActivity);
 }
 
 export async function handleScheduled(env: Env) {
@@ -70,34 +70,37 @@ export async function handleScheduled(env: Env) {
   try {
     const { sessions } = await jules.listSessions();
     if (!sessions) return;
+
     for (const session of sessions) {
       const sessionId = session.name.split('/').pop();
-      // FIX: Use getAllActivities to ensure we see the latest page
-      const { activities } = await jules.getAllActivities(sessionId);
-      if (!activities || activities.length === 0) continue;
+      const { activities } = await jules.getRecentActivities(sessionId, 30);
+      if (!activities.length) continue;
 
-      const lastActivity = activities[activities.length - 1];
+      const sorted = [...activities].sort(
+        (a: any, b: any) => new Date(a.createTime || 0).getTime() - new Date(b.createTime || 0).getTime()
+      );
+      const lastActivity = sorted[sorted.length - 1];
       if (lastActivity.type === 'PROGRESS_UPDATED') continue;
 
       const lastActivityId = lastActivity.name;
       const storedId = await env.JULES_NOTIFICATIONS_KV.get(`last_notified:${sessionId}`);
-      if (storedId !== lastActivityId) {
-        const significantTypes = ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED', 'AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'];
-        const isSignificant = significantTypes.includes(lastActivity.type) ||
-                              session.state === 'AWAITING_PLAN_APPROVAL' ||
-                              session.state === 'AWAITING_USER_FEEDBACK';
-        if (isSignificant) {
-          const activityDesc = getSummary(lastActivity);
-          await bot.api.sendMessage(adminId,
-            `🔔 **Update for Session \`${session.title || session.displayName || sessionId}\`**\n\n` +
-            `**Status:** \`${session.state}\`\n` +
-            `**New Activity:** ${getFriendlyType(lastActivity.type)}\n${activityDesc}\n\n` +
-            `Use /sessions to manage.`,
-            { parse_mode: 'Markdown' }
-          );
-        }
-        await env.JULES_NOTIFICATIONS_KV.put(`last_notified:${sessionId}`, lastActivityId);
+      if (storedId === lastActivityId) continue;
+
+      const significantTypes = ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED', 'AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'];
+      const isSignificant =
+        significantTypes.includes(lastActivity.type) ||
+        session.state === 'AWAITING_PLAN_APPROVAL' ||
+        session.state === 'AWAITING_USER_FEEDBACK';
+
+      if (isSignificant) {
+        const activityDesc = escapeMarkdown(getSummary(lastActivity));
+        await bot.api.sendMessage(
+          adminId,
+          `🔔 *Update for Session*\nTitle: ${escapeMarkdown(session.title || session.displayName || sessionId)}\nStatus: ${escapeMarkdown(session.state || 'UNKNOWN')}\nActivity: ${escapeMarkdown(getFriendlyType(lastActivity.type))}\n${activityDesc}\n\nUse /sessions to manage.`,
+          { parse_mode: 'Markdown' }
+        );
       }
+      await env.JULES_NOTIFICATIONS_KV.put(`last_notified:${sessionId}`, lastActivityId);
     }
   } catch (e) {
     console.error('Notification Error:', e);
@@ -106,57 +109,50 @@ export async function handleScheduled(env: Env) {
 
 app.post('/webhook', async (c) => {
   const bot = new Bot(c.env.TELEGRAM_TOKEN);
-  const adminIds = c.env.ADMIN_USER_ID.split(',').map(id => id.trim());
+  const adminIds = c.env.ADMIN_USER_ID.split(',').map((id) => id.trim());
   const jules = new JulesClient(c.env.JULES_API_KEY);
 
   bot.use(async (ctx, next) => {
-    if (ctx.from && adminIds.includes(ctx.from.id.toString())) {
-      return next();
-    }
-    if (ctx.message?.text?.startsWith('/')) {
-      await ctx.reply('🚫 Unauthorized.');
-    }
+    if (ctx.from && adminIds.includes(ctx.from.id.toString())) return next();
+    if (ctx.message?.text?.startsWith('/')) await ctx.reply('🚫 Unauthorized.');
   });
 
-  bot.command('start', (ctx) => ctx.reply('👋 Hello! I am your Jules Bot.\n\n/sessions - List active sessions\n/new - Start a new session\n/check - Check configuration'));
+  bot.command('start', (ctx) =>
+    ctx.reply('👋 Hello! I am your Jules Bot.\n\n/sessions - List active sessions\n/new - Start a new session\n/check - Check configuration')
+  );
 
   bot.command('check', async (ctx) => {
-      let report = "🛠 **System Check**\n\n";
+    let report = '🛠 **System Check**\n\n';
+    report += `✅ Admin ID: \`${ctx.from?.id}\` (In whitelist)\n`;
+    report += `✅ API Key: ${c.env.JULES_API_KEY ? 'Configured' : '❌ MISSING'}\n`;
+    report += `✅ Bot Token: ${c.env.TELEGRAM_TOKEN ? 'Configured' : '❌ MISSING'}\n`;
 
-      // 1. Env check
-      report += `✅ Admin ID: \`${ctx.from?.id}\` (In whitelist)\n`;
-      report += `✅ API Key: ${c.env.JULES_API_KEY ? 'Configured' : '❌ MISSING'}\n`;
-      report += `✅ Bot Token: ${c.env.TELEGRAM_TOKEN ? 'Configured' : '❌ MISSING'}\n`;
-
-      // 2. KV Check
-      if (c.env.JULES_NOTIFICATIONS_KV) {
-          try {
-              await c.env.JULES_NOTIFICATIONS_KV.put('test_key', 'test_val');
-              report += `✅ KV Storage: Working\n`;
-          } catch (e: any) {
-              report += `❌ KV Storage: Failed (${e.message})\n`;
-          }
-      } else {
-          report += `ℹ️ KV Storage: Not bound (Notifications disabled)\n`;
-      }
-
-      // 3. Jules Connectivity
+    if (c.env.JULES_NOTIFICATIONS_KV) {
       try {
-          await jules.listSources();
-          report += `✅ Jules API: Connected\n`;
+        await c.env.JULES_NOTIFICATIONS_KV.put('healthcheck_key', `${Date.now()}`);
+        report += '✅ KV Storage: Working\n';
       } catch (e: any) {
-          report += `❌ Jules API: Connection failed (${e.message})\n`;
+        report += `❌ KV Storage: Failed (${e.message})\n`;
       }
+    } else {
+      report += 'ℹ️ KV Storage: Not bound (Notifications disabled)\n';
+    }
 
-      await ctx.reply(report, { parse_mode: 'Markdown' });
+    try {
+      await jules.listSources();
+      report += '✅ Jules API: Connected\n';
+    } catch (e: any) {
+      report += `❌ Jules API: Connection failed (${e.message})\n`;
+    }
+
+    await ctx.reply(report, { parse_mode: 'Markdown' });
   });
 
   bot.command('sessions', async (ctx) => {
     try {
       const { sessions } = await jules.listSessions();
-      if (!sessions || sessions.length === 0) {
-        return ctx.reply('No active sessions found.');
-      }
+      if (!sessions?.length) return ctx.reply('No active sessions found.');
+
       const keyboard = new InlineKeyboard();
       sessions.slice(0, 10).forEach((s: any) => {
         const id = s.name.split('/').pop();
@@ -172,13 +168,12 @@ app.post('/webhook', async (c) => {
   bot.command('new', async (ctx) => {
     try {
       const { sources } = await jules.listSources();
-      if (!sources || sources.length === 0) {
-        return ctx.reply('No repositories found.');
-      }
+      if (!sources?.length) return ctx.reply('No repositories found.');
+
       const keyboard = new InlineKeyboard();
-      sources.slice(0, 8).forEach((src: any) => {
+      sources.slice(0, 8).forEach((src: any, idx: number) => {
         const name = src.name.split('/').pop();
-        keyboard.text(name, `create_select:${src.name}`).row();
+        keyboard.text(name, `create_select_idx:${idx}`).row();
       });
       await ctx.reply('Select a repository:', { reply_markup: keyboard });
     } catch (e: any) {
@@ -204,19 +199,20 @@ app.post('/webhook', async (c) => {
         }
       }
     }
+
     if (!ctx.message.text.startsWith('/')) {
-        await ctx.reply('To reply to a session, use the "Reply" feature on a session message.');
+      await ctx.reply('To reply to a session, use the "Reply" feature on a session message.');
     }
   });
 
   bot.on('callback_query:data', async (ctx) => {
     const data = ctx.callbackQuery.data;
     const [action, ...args] = data.split(':');
-    const id = args[0]; // sessionId
-    const subId = args[1]; // index
+    const id = args[0];
+    const subId = args[1];
 
-    if (action === 'view') {
-      try {
+    try {
+      if (action === 'view') {
         const session = await jules.getSession(id);
         const status = session.state || 'UNKNOWN';
         const title = session.title || session.displayName || id;
@@ -227,96 +223,115 @@ app.post('/webhook', async (c) => {
           .text('🔙 Back to List', 'sessions_back');
 
         await ctx.editMessageText(
-          `**Session:** ${title}\n**ID:** \`${id}\`\n**Status:** \`${status}\`\n**Source:** \`${session.sourceContext?.source || session.source || 'Unknown'}\`\n\n💡 _Tip: Reply to this message to send a chat to Jules._`,
+          `**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${status}\`\n**Source:** \`${escapeMarkdown(session.sourceContext?.source || session.source || 'Unknown')}\`\n\n💡 _Tip: Reply to this message to send a chat to Jules._`,
           { parse_mode: 'Markdown', reply_markup: keyboard }
         );
-      } catch (e: any) {
-        await ctx.answerCallbackQuery(`Error: ${e.message}`);
-      }
-    } else if (action === 'sessions_back') {
+      } else if (action === 'sessions_back') {
         const { sessions } = await jules.listSessions();
         const keyboard = new InlineKeyboard();
-        sessions.slice(0, 10).forEach((s: any) => {
+        (sessions || []).slice(0, 10).forEach((s: any) => {
           const sid = s.name.split('/').pop();
           const label = s.title || s.displayName || sid;
           keyboard.text(`📝 ${label}`, `view:${sid}`).row();
         });
         await ctx.editMessageText('Recent Sessions:', { reply_markup: keyboard });
-    } else if (action === 'activities') {
-        try {
-          // FIX: Use getAllActivities to get latest page
-          const { activities } = await jules.getAllActivities(id);
-          const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
-          const keyboard = new InlineKeyboard();
+      } else if (action === 'activities') {
+        const { activities } = await jules.getRecentActivities(id, 40);
+        const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
+        const itemsToShow = filtered
+          .sort((a: any, b: any) => new Date(b.createTime || 0).getTime() - new Date(a.createTime || 0).getTime())
+          .slice(0, 5);
 
-          let listText = `**Recent Activities** (Latest first)\nSession: \`${id}\`\n\n`;
-          const itemsToShow = filtered.slice(-5).reverse();
-          itemsToShow.forEach((a: any, idx: number) => {
-              const time = new Date(a.createTime).toLocaleTimeString();
-              const typeLabel = getFriendlyType(a.type);
-              const summary = getSummary(a, false);
-              listText += `🕒 ${time} **${typeLabel}**\n${summary}\n\n`;
-              const originalIndex = filtered.length - 1 - idx;
-              keyboard.text(`🔍 Details: ${a.type || 'Activity'}`, `act_idx:${id}:${originalIndex}`).row();
-          });
-          keyboard.text('🔙 Back', `view:${id}`);
+        const keyboard = new InlineKeyboard();
+        let listText = `**Recent Activities** (Latest first)\nSession: \`${id}\`\n\n`;
 
-          if (listText.length > 4000) listText = listText.substring(0, 3900) + '...';
-          await ctx.editMessageText(listText, { parse_mode: 'Markdown', reply_markup: keyboard });
-        } catch (e: any) {
-          await ctx.answerCallbackQuery(`Error: ${e.message}`);
+        itemsToShow.forEach((a: any) => {
+          const time = new Date(a.createTime).toLocaleTimeString();
+          const typeLabel = getFriendlyType(a.type);
+          const summary = getSummary(a, false);
+          const activityIndex = itemsToShow.indexOf(a);
+          listText += `🕒 ${time} **${typeLabel}**\n${escapeMarkdown(summary)}\n\n`;
+          keyboard.text(`🔍 Details: ${a.type || 'Activity'}`, `act:${id}:${activityIndex}`).row();
+        });
+        keyboard.text('🔙 Back', `view:${id}`);
+
+        if (listText.length > 4000) listText = `${listText.substring(0, 3900)}...`;
+        await ctx.editMessageText(listText, { parse_mode: 'Markdown', reply_markup: keyboard });
+      } else if (action === 'act') {
+        const detailIndex = Number(subId);
+        if (Number.isNaN(detailIndex)) {
+          await ctx.answerCallbackQuery('Invalid activity index.');
+          return;
         }
-    } else if (action === 'act_idx') {
-        try {
-            const { activities } = await jules.getAllActivities(id);
-            const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
-            const index = parseInt(subId);
-            const activity = filtered[index];
-            if (!activity) return ctx.answerCallbackQuery('Expired.');
-            const time = new Date(activity.createTime).toLocaleString();
-            const fullContent = `**Activity Detail**\n\n**Session ID:** \`${id}\`\n**Time:** ${time}\n**Type:** ${getFriendlyType(activity.type)}\n\n${getSummary(activity, true)}`;
-            const keyboard = new InlineKeyboard().text('🔙 Back to List', `activities:${id}`);
-            if (fullContent.length <= 4000) {
-                await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
-            } else {
-                await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
-                await ctx.reply('^ Full details above.', { reply_markup: keyboard });
-            }
-        } catch (e: any) {
-            await ctx.answerCallbackQuery(`Error: ${e.message}`);
+        const { activities } = await jules.getRecentActivities(id, 40);
+        const filtered = activities
+          .filter((a: any) => a.type !== 'PROGRESS_UPDATED')
+          .sort((a: any, b: any) => new Date(b.createTime || 0).getTime() - new Date(a.createTime || 0).getTime())
+          .slice(0, 5);
+        const activity = filtered[detailIndex];
+        if (!activity) {
+          await ctx.answerCallbackQuery('Activity expired, please refresh.');
+          return;
         }
-    } else if (action === 'plan_view') {
-      try {
+
+        const time = new Date(activity.createTime).toLocaleString();
+        const fullContent = `**Activity Detail**\n\n**Session ID:** \`${id}\`\n**Time:** ${time}\n**Type:** ${getFriendlyType(activity.type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
+        const keyboard = new InlineKeyboard().text('🔙 Back to List', `activities:${id}`);
+
+        if (fullContent.length <= 4000) {
+          await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
+        } else {
+          await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
+          await ctx.reply('^ Full details above.', { reply_markup: keyboard });
+        }
+      } else if (action === 'plan_view') {
         const session = await jules.getSession(id);
         const { activities } = await jules.getAllActivities(id);
         const planText = formatPlan(activities);
         const keyboard = new InlineKeyboard();
         if (session.state === 'AWAITING_PLAN_APPROVAL') {
-            keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
+          keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
         }
         keyboard.text('⬅️ Back', `view:${id}`);
-        const header = `📋 **Plan Details:**\n\n**ID:** \`${id}\`\n${session.state === 'AWAITING_PLAN_APPROVAL' ? '⚠️ Approval Required!' : ''}\n\n`;
-        const fullContent = header + planText;
+
+        const header = `📋 **Plan Details:**\n\n**ID:** \`${id}\`\n${
+          session.state === 'AWAITING_PLAN_APPROVAL' ? '⚠️ Approval Required!' : ''
+        }\n\n`;
+        const fullContent = `${header}${escapeMarkdown(planText)}`;
+
         if (fullContent.length <= 4000) {
-            await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
+          await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
         } else {
-            await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
-            await ctx.reply('^ Plan details above.', { reply_markup: keyboard });
+          await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
+          await ctx.reply('^ Plan details above.', { reply_markup: keyboard });
         }
-      } catch (e: any) {
-        await ctx.answerCallbackQuery(`Error: ${e.message}`);
+      } else if (action === 'approve_do') {
+        await jules.approvePlan(id);
+        await ctx.editMessageText(`✅ Plan approved for session \`${id}\`.`, { parse_mode: 'Markdown' });
+      } else if (action === 'create_select_idx') {
+        const sourceIdx = Number(id);
+        if (Number.isNaN(sourceIdx)) {
+          await ctx.answerCallbackQuery('Invalid source.');
+          return;
+        }
+
+        const { sources } = await jules.listSources();
+        const source = (sources || []).slice(0, 8)[sourceIdx];
+        if (!source?.name) {
+          await ctx.answerCallbackQuery('Source expired, run /new again.');
+          return;
+        }
+
+        await ctx.editMessageText(
+          `Source selected: \`${source.name}\`\n\nTo start, send:\n\`/start_session ${source.name} [Options] Your prompt\``,
+          { parse_mode: 'Markdown' }
+        );
       }
-    } else if (action === 'approve_do') {
-        try {
-            await jules.approvePlan(id);
-            await ctx.editMessageText(`✅ Plan approved for session \`${id}\`.`, { parse_mode: 'Markdown' });
-        } catch (e: any) {
-            await ctx.answerCallbackQuery(`Error: ${e.message}`);
-        }
-    } else if (action === 'create_select') {
-      await ctx.editMessageText(`Source selected: \`${id}\`\n\nTo start, send:\n\`/start_session ${id} [Options] Your prompt\``, { parse_mode: 'Markdown' });
+
+      await ctx.answerCallbackQuery();
+    } catch (e: any) {
+      await ctx.answerCallbackQuery(`Error: ${e.message}`);
     }
-    await ctx.answerCallbackQuery();
   });
 
   bot.command('reply', async (ctx) => {
@@ -324,6 +339,7 @@ app.post('/webhook', async (c) => {
     const match = text.match(/\/reply\s+([^\s]+)\s+(.+)/);
     if (!match) return ctx.reply('Usage: /reply [session_id] [message]');
     const [, sessionId, message] = match;
+
     try {
       await jules.sendMessage(sessionId, message);
       await ctx.reply(`✅ Message sent to \`${sessionId}\`.`);
@@ -336,26 +352,33 @@ app.post('/webhook', async (c) => {
     const text = ctx.message?.text || '';
     const parts = text.split(/\s+/);
     if (parts.length < 3) return ctx.reply('Usage: /start_session [source] [options] [prompt]');
+
     const sourceName = parts[1];
-    let promptParts: string[] = [];
+    const promptParts: string[] = [];
     const options: CreateSessionOptions = {};
+
     for (let i = 2; i < parts.length; i++) {
-        const p = parts[i];
-        if (p === '-i' || p === '--interactive') options.requirePlanApproval = true;
-        else if (p === '-a' || p === '--auto-pr') options.automationMode = 'AUTO_CREATE_PR';
-        else if (p === '-b' || p === '--branch') options.startingBranch = parts[++i];
-        else if (p === '-t' || p === '--title') {
-            let titleParts = [];
-            while (i + 1 < parts.length && !parts[i+1].startsWith('-')) titleParts.push(parts[++i]);
-            options.title = titleParts.join(' ');
-        } else promptParts.push(p);
+      const p = parts[i];
+      if (p === '-i' || p === '--interactive') options.requirePlanApproval = true;
+      else if (p === '-a' || p === '--auto-pr') options.automationMode = 'AUTO_CREATE_PR';
+      else if (p === '-b' || p === '--branch') options.startingBranch = parts[++i];
+      else if (p === '-t' || p === '--title') {
+        const titleParts = [];
+        while (i + 1 < parts.length && !parts[i + 1].startsWith('-')) titleParts.push(parts[++i]);
+        options.title = titleParts.join(' ');
+      } else promptParts.push(p);
     }
+
     const prompt = promptParts.join(' ');
     if (!prompt) return ctx.reply('Please provide a prompt.');
+
     try {
       const session = await jules.createSession(sourceName, prompt, options);
       const sessionId = session.name.split('/').pop();
-      await ctx.reply(`🚀 Session started! ID: \`${sessionId}\`\nMode: ${options.requirePlanApproval ? 'Interactive' : 'Auto'}\nBranch: ${options.startingBranch || 'main'}`, { parse_mode: 'Markdown' });
+      await ctx.reply(
+        `🚀 Session started! ID: \`${sessionId}\`\nMode: ${options.requirePlanApproval ? 'Interactive' : 'Auto'}\nBranch: ${options.startingBranch || 'main'}`,
+        { parse_mode: 'Markdown' }
+      );
     } catch (e: any) {
       await ctx.reply(`❌ Failed: ${e.message}`);
     }
