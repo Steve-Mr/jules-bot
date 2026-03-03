@@ -268,23 +268,27 @@ app.post('/webhook', async (c) => {
     const replyText = replyTo?.text || replyTo?.caption || '';
 
     // Pattern 1: Wizard Confirmation (Highest priority)
-    const wizMatch = replyText.match(/WizID:\s*`?([a-z0-9]+)`?/i);
+    // Robust regex to handle potential Markdown artifacts (**, `)
+    const wizMatch = replyText.match(/(?:\*\*|__)?WizID(?:\*\*|__)?:\s*[`*_]*([a-z0-9]+)[`*_]*/i);
     if (wizMatch) {
-        const state = await getWizardState(c.env, wizMatch[1]);
+        const wizId = wizMatch[1];
+        const state = await getWizardState(c.env, wizId);
         if (state) {
             try {
                 const session = await jules.createSession(state.source, text, state);
                 const sid = session.name.split('/').pop();
-                // Ensure registration happens here
                 await registerSession(c.env, sid, state.title || text.substring(0, 30));
                 return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Tracked)`);
             } catch (e: any) { return ctx.reply(`❌ Failed to create session: ${e.message}`); }
+        } else {
+            return ctx.reply('⚠️ Wizard session expired or not found. Please start over with /new.');
         }
     }
 
     // Pattern 2: Normal reply to a session message
     if (replyTo) {
-      const sidMatch = replyText.match(/(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
+      // Use a negative lookahead to ensure we don't accidentally match WizID as a session ID
+      const sidMatch = replyText.match(/(?<!Wiz)(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
       if (sidMatch) {
         try {
           await jules.sendMessage(sidMatch[1], text);
@@ -339,7 +343,10 @@ app.post('/webhook', async (c) => {
         if (!state) return ctx.reply('Wizard expired.');
         state.automationMode = (subId === 'yes' ? 'AUTO_CREATE_PR' : 'AUTOMATION_MODE_UNSPECIFIED');
         const wizId = await saveWizardState(c.env, state);
-        await ctx.reply(`🚀 **READY TO START**\n\n📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? 'Yes' : 'No'}\`\n\n**WizID:** \`${wizId}\`\nReply with your task prompt:`, { reply_markup: { force_reply: true } });
+        await ctx.reply(`🚀 **READY TO START**\n\n📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? 'Yes' : 'No'}\`\n\n**WizID:** \`${wizId}\`\nReply with your task prompt:`, {
+            parse_mode: 'Markdown',
+            reply_markup: { force_reply: true }
+        });
     } else if (action === 'view') {
         try {
             const session = await jules.getSession(id);
