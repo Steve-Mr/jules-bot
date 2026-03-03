@@ -73,7 +73,7 @@ function formatPlan(activities: any[]): string {
 async function getCallbackData(env: Env, prefix: string, sid: string, sub: string): Promise<string> {
     const full = `${prefix}:${sid}:${sub}`;
     if (full.length <= 64) return full;
-    if (!env.JULES_NOTIFICATIONS_KV) return `${prefix}:LONG_ID_ERROR`; // Fail gracefully
+    if (!env.JULES_NOTIFICATIONS_KV) return `${prefix}:LONG_ID_ERROR`;
     const shortId = Math.random().toString(36).substring(2, 8);
     await env.JULES_NOTIFICATIONS_KV.put(`cb:${shortId}`, full, { expirationTtl: 3600 });
     return `cb_map:${shortId}`;
@@ -96,9 +96,12 @@ async function getWizardState(env: Env, wizId: string): Promise<WizardState | nu
 async function registerSession(env: Env, sessionId: string, title: string) {
     if (!env.JULES_NOTIFICATIONS_KV) return;
     const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
-    const registry: TrackedSession[] = raw ? JSON.parse(raw) : [];
-    registry.push({ id: sessionId, title, createTime: Date.now() });
-    await env.JULES_NOTIFICATIONS_KV.put('track:registry', JSON.stringify(registry));
+    let registry: TrackedSession[] = raw ? JSON.parse(raw) : [];
+    // Prevent duplicate entries
+    if (!registry.find(s => s.id === sessionId)) {
+        registry.push({ id: sessionId, title, createTime: Date.now() });
+        await env.JULES_NOTIFICATIONS_KV.put('track:registry', JSON.stringify(registry));
+    }
 }
 
 // --- Scheduled Task ---
@@ -136,7 +139,7 @@ export async function handleScheduled(env: Env) {
         }
       } catch (e) {
           console.error(`Error tracking ${entry.id}:`, e);
-          updatedRegistry.push(entry); // Keep it for retry
+          updatedRegistry.push(entry); // Retry next time
       }
     }
     await env.JULES_NOTIFICATIONS_KV.put('track:registry', JSON.stringify(updatedRegistry));
@@ -153,13 +156,13 @@ app.post('/webhook', async (c) => {
   // Global Error Handler
   bot.catch((err) => {
     const ctx = err.ctx;
-    console.error(`Error while handling update ${ctx.update.update_id}:`, err.error);
+    console.error(`Bot Error:`, err.error);
     const adminId = adminIds[0];
     if (adminId) {
         let errMsg = `❌ **Bot Error**\n\n`;
         if (err instanceof GrammyError) errMsg += `Grammy: ${err.message}`;
-        else if (err instanceof HttpError) errMsg += `Telegram API: ${err.message}`;
-        else errMsg += `Unknown: ${String(err.error)}`;
+        else if (err instanceof HttpError) errMsg += `Telegram: ${err.message}`;
+        else errMsg += `Error: ${String(err.error)}`;
         bot.api.sendMessage(adminId, errMsg, { parse_mode: 'Markdown' }).catch(() => {});
     }
   });
@@ -169,7 +172,7 @@ app.post('/webhook', async (c) => {
     if (ctx.message?.text?.startsWith('/')) await ctx.reply('🚫 Unauthorized.');
   });
 
-  // 1. High Priority Commands
+  // 1. Commands
   bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage\n/new - Create\n/check - Diagnostics'));
 
   bot.command('check', async (ctx) => {
@@ -177,7 +180,18 @@ app.post('/webhook', async (c) => {
       report += `✅ Admin ID: \`${ctx.from?.id}\`\n`;
       report += `✅ API Key: ${c.env.JULES_API_KEY ? 'OK' : '❌'}\n`;
       if (c.env.JULES_NOTIFICATIONS_KV) {
-          try { await c.env.JULES_NOTIFICATIONS_KV.put('check_v8', 'ok'); report += `✅ KV: Working\n`; }
+          try {
+              await c.env.JULES_NOTIFICATIONS_KV.put('check_v9', 'ok');
+              const raw = await c.env.JULES_NOTIFICATIONS_KV.get('track:registry');
+              const registry: TrackedSession[] = raw ? JSON.parse(raw) : [];
+              report += `✅ KV: Working\n\n**Tracking List (${registry.length}):**\n`;
+              if (registry.length > 0) {
+                  registry.forEach(s => {
+                      const ageMin = Math.round((Date.now() - s.createTime) / 60000);
+                      report += `- \`${s.id}\`: ${s.title} (${ageMin}m ago)\n`;
+                  });
+              } else report += "_No sessions currently being tracked._";
+          }
           catch (e: any) { report += `❌ KV: Error (${e.message})\n`; }
       } else report += `ℹ️ KV: Not bound\n`;
       try { await jules.listSources(); report += `✅ API: Connected\n`; }
@@ -247,35 +261,39 @@ app.post('/webhook', async (c) => {
     } catch (e: any) { await ctx.reply(`❌ Failed: ${e.message}`); }
   });
 
-  // 2. Text Matcher
+  // 2. Text Matcher (Conversational logic)
   bot.on('message:text', async (ctx) => {
     const text = ctx.message.text;
     const replyTo = ctx.message.reply_to_message;
+    const replyText = replyTo?.text || replyTo?.caption || '';
 
-    if (replyTo?.text?.includes('READY TO START')) {
-        const wizMatch = replyTo.text.match(/WizID:\s*`?([a-z0-9]+)`?/i);
-        if (wizMatch) {
-            const state = await getWizardState(c.env, wizMatch[1]);
-            if (state) {
-                try {
-                    const session = await jules.createSession(state.source, text, state);
-                    const sid = session.name.split('/').pop();
-                    await registerSession(c.env, sid, state.title || text.substring(0, 30));
-                    return ctx.reply(`🚀 Session started! ID: \`${sid}\``);
-                } catch (e: any) { return ctx.reply(`❌ Failed: ${e.message}`); }
-            }
+    // Pattern 1: Wizard Confirmation (Highest priority)
+    const wizMatch = replyText.match(/WizID:\s*`?([a-z0-9]+)`?/i);
+    if (wizMatch) {
+        const state = await getWizardState(c.env, wizMatch[1]);
+        if (state) {
+            try {
+                const session = await jules.createSession(state.source, text, state);
+                const sid = session.name.split('/').pop();
+                // Ensure registration happens here
+                await registerSession(c.env, sid, state.title || text.substring(0, 30));
+                return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Tracked)`);
+            } catch (e: any) { return ctx.reply(`❌ Failed to create session: ${e.message}`); }
         }
     }
+
+    // Pattern 2: Normal reply to a session message
     if (replyTo) {
-      const sidMatch = (replyTo.text || '').match(/(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
+      const sidMatch = replyText.match(/(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
       if (sidMatch) {
         try {
           await jules.sendMessage(sidMatch[1], text);
-          return ctx.reply(`✅ Sent.`, { reply_to_message_id: ctx.message.message_id });
-        } catch (e: any) { return ctx.reply(`❌ Failed: ${e.message}`); }
+          return ctx.reply(`✅ Sent to session \`${sidMatch[1]}\`.`, { reply_to_message_id: ctx.message.message_id });
+        } catch (e: any) { return ctx.reply(`❌ Failed to send: ${e.message}`); }
       }
     }
-    await ctx.reply('Use /help or reply to a session.');
+
+    await ctx.reply('Use /help or reply to a session message to chat.');
   });
 
   // 3. Callback Handlers
@@ -291,11 +309,10 @@ app.post('/webhook', async (c) => {
     const subId = args[1];
 
     if (action === 'wiz_repo') {
-        const targetRepo = args[2] || subId; // handle potential mapping shift
+        const targetRepo = args[2] || subId;
         const sources = await jules.listSources();
         const source = sources.sources?.find((s: any) => s.name === targetRepo);
         if (!source) return ctx.reply('Source not found.');
-
         const branches = source.githubRepo?.branches?.map((b: any) => b.displayName) || ['main'];
         const wizId = await saveWizardState(c.env, { source: targetRepo, startingBranch: 'main', branches });
         const keyboard = new InlineKeyboard();
@@ -305,7 +322,7 @@ app.post('/webhook', async (c) => {
         await ctx.editMessageText(`📂 Repo: \`${targetRepo}\`\n\n🚀 Step 2: Select branch:`, { parse_mode: 'Markdown', reply_markup: keyboard });
     } else if (action === 'wiz_br') {
         const state = await getWizardState(c.env, id);
-        if (!state || !state.branches) return ctx.reply('Wizard expired.');
+        if (!state || !state.branches) return ctx.reply('Wizard expired. Start over with /new.');
         state.startingBranch = state.branches[parseInt(subId)];
         const wizId = await saveWizardState(c.env, state);
         const keyboard = new InlineKeyboard().text('📋 Interactive', `wiz_mode:${wizId}:int`).row().text('⚡ Auto', `wiz_mode:${wizId}:auto`).row();
