@@ -60,15 +60,13 @@ function formatPlan(activities: any[]): string {
 async function getCallbackData(env: Env, prefix: string, sid: string, sub: string): Promise<string> {
     const full = `${prefix}:${sid}:${sub}`;
     if (full.length <= 64) return full;
-
-    // Generate a short ID and store in KV (expires in 1 hour)
     if (!env.JULES_NOTIFICATIONS_KV) return `${prefix}:${sid}:ERR_LONG`;
     const shortId = Math.random().toString(36).substring(2, 8);
     await env.JULES_NOTIFICATIONS_KV.put(`cb:${shortId}`, full, { expirationTtl: 3600 });
     return `cb_map:${shortId}`;
 }
 
-// --- Scheduled Task ---
+// --- Scheduled Task (Refactored for CPU Efficiency & Sensitivity) ---
 
 export async function handleScheduled(env: Env) {
   if (!env.JULES_NOTIFICATIONS_KV || !env.TELEGRAM_TOKEN || !env.ADMIN_USER_ID) return;
@@ -79,35 +77,54 @@ export async function handleScheduled(env: Env) {
   try {
     const { sessions } = await jules.listSessions();
     if (!sessions) return;
+
     for (const session of sessions) {
       const sessionId = session.name.split('/').pop();
-      const { activities } = await jules.getAllActivities(sessionId);
+      const currentUpdateTime = session.updateTime; // standard field in API
+
+      // 1. FAST PATH: Skip if Session hasn't been updated since last notification
+      const lastKnownUpdateTime = await env.JULES_NOTIFICATIONS_KV.get(`last_update_time:${sessionId}`);
+      if (lastKnownUpdateTime === currentUpdateTime) continue;
+
+      // 2. FETCH LATEST ACTIVITIES (One page only to save CPU)
+      const { activities } = await jules.getActivities(sessionId);
       if (!activities || activities.length === 0) continue;
 
-      const lastActivity = activities[activities.length - 1];
-      if (lastActivity.type === 'PROGRESS_UPDATED') continue;
+      const lastNotifiedActivityId = await env.JULES_NOTIFICATIONS_KV.get(`last_activity_id:${sessionId}`);
 
-      const lastActivityId = lastActivity.name;
-      const storedId = await env.JULES_NOTIFICATIONS_KV.get(`last_notified:${sessionId}`);
-      if (storedId !== lastActivityId) {
-        const sigStates = ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'COMPLETED', 'FAILED'];
-        const isSig = sigStates.includes(session.state) || ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED'].includes(lastActivity.type);
+      // 3. SCAN FOR NEW SIGNIFICANT EVENTS
+      // Find where we left off
+      const lastSeenIdx = activities.findIndex((a: any) => a.name === lastNotifiedActivityId);
+      // New activities are those AFTER the last seen one
+      const newActivities = lastSeenIdx === -1 ? [activities[activities.length - 1]] : activities.slice(lastSeenIdx + 1);
 
-        if (isSig) {
-          const activityDesc = getSummary(lastActivity);
-          await bot.api.sendMessage(adminId,
-            `🔔 **Update: ${session.title || session.displayName || sessionId}**\n\n` +
-            `**Status:** \`${session.state}\`\n` +
-            `**New Activity:** ${getFriendlyType(lastActivity.type)}\n${activityDesc}\n\n` +
-            `Use /sessions to manage.`,
-            { parse_mode: 'Markdown' }
-          );
-        }
-        await env.JULES_NOTIFICATIONS_KV.put(`last_notified:${sessionId}`, lastActivityId);
+      const significantTypes = ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED', 'AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'];
+
+      for (const act of newActivities) {
+          // If the activity itself is significant OR the session entered a wait state
+          const isSig = significantTypes.includes(act.type) ||
+                        ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'].includes(session.state);
+
+          // Filter out progress noise even if state is waiting
+          if (isSig && act.type !== 'PROGRESS_UPDATED') {
+              await bot.api.sendMessage(adminId,
+                `🔔 **New Update for ${session.title || session.displayName || sessionId}**\n\n` +
+                `**Status:** \`${session.state}\`\n` +
+                `**Event:** ${getFriendlyType(act.type)}\n${getSummary(act)}\n\n` +
+                `Use /sessions to manage.`,
+                { parse_mode: 'Markdown' }
+              );
+              // Break after first notification to prevent spam if multiple events happened
+              break;
+          }
       }
+
+      // 4. PERSIST STATE
+      await env.JULES_NOTIFICATIONS_KV.put(`last_update_time:${sessionId}`, currentUpdateTime);
+      await env.JULES_NOTIFICATIONS_KV.put(`last_activity_id:${sessionId}`, activities[activities.length - 1].name);
     }
   } catch (e) {
-    console.error('Notification Error:', e);
+    console.error('Notification Engine Error:', e);
   }
 }
 
@@ -118,7 +135,6 @@ app.post('/webhook', async (c) => {
   const adminIds = c.env.ADMIN_USER_ID.split(',').map(id => id.trim());
   const jules = new JulesClient(c.env.JULES_API_KEY);
 
-  // 1. Auth Middleware
   bot.use(async (ctx, next) => {
     if (ctx.from && adminIds.includes(ctx.from.id.toString())) {
       return next();
@@ -128,7 +144,6 @@ app.post('/webhook', async (c) => {
     }
   });
 
-  // 2. High Priority Commands
   bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n\n/sessions - Manage tasks\n/new - Start task\n/check - Diagnostics'));
 
   bot.command('check', async (ctx) => {
@@ -137,7 +152,7 @@ app.post('/webhook', async (c) => {
       report += `✅ API Key: ${c.env.JULES_API_KEY ? 'Configured' : '❌ MISSING'}\n`;
       report += `✅ Bot Token: ${c.env.TELEGRAM_TOKEN ? 'Configured' : '❌ MISSING'}\n`;
       if (c.env.JULES_NOTIFICATIONS_KV) {
-          try { await c.env.JULES_NOTIFICATIONS_KV.put('check_v3', 'ok'); report += `✅ KV Storage: Working\n`; }
+          try { await c.env.JULES_NOTIFICATIONS_KV.put('check_v4', 'ok'); report += `✅ KV Storage: Working\n`; }
           catch (e: any) { report += `❌ KV Storage: Failed (${e.message})\n`; }
       } else report += `ℹ️ KV Storage: Not bound\n`;
       try { await jules.listSources(); report += `✅ Jules API: Connected\n`; }
@@ -205,25 +220,19 @@ app.post('/webhook', async (c) => {
     } catch (e: any) { await ctx.reply(`❌ Failed: ${e.message}`); }
   });
 
-  // 3. Text Matcher (For Replies & ForceReply)
   bot.on('message:text', async (ctx, next) => {
     const text = ctx.message.text;
     const replyTo = ctx.message.reply_to_message;
-
-    // Pattern 1: ForceReply for new sessions
-    if (replyTo?.text?.includes('Select repo:') || replyTo?.text?.includes('已选择仓库')) {
+    if (replyTo?.text?.includes('已选择仓库') || replyTo?.text?.includes('Select repo:')) {
         const repoMatch = replyTo.text.match(/`([^`]+)`/);
         if (repoMatch) {
             try {
-                // Parse options from reply if possible, or default to interactive
                 const session = await jules.createSession(repoMatch[1], text, { requirePlanApproval: true });
                 const sid = session.name.split('/').pop();
                 return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Interactive Mode)`);
             } catch (e: any) { return ctx.reply(`❌ Failed: ${e.message}`); }
         }
     }
-
-    // Pattern 2: Normal reply to a session message
     if (replyTo) {
       const msgText = replyTo.text || replyTo.caption || '';
       const sidMatch = msgText.match(/(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
@@ -234,24 +243,19 @@ app.post('/webhook', async (c) => {
         } catch (e: any) { return ctx.reply(`❌ Failed: ${e.message}`); }
       }
     }
-
     await ctx.reply('Reply to a session message to chat, or use /help.');
   });
 
-  // 4. Callback Query Handler
   bot.on('callback_query:data', async (ctx) => {
-    // Immediate response to clear loading state
     await ctx.answerCallbackQuery().catch(() => {});
-
     let rawData = ctx.callbackQuery.data;
     if (rawData.startsWith('cb_map:')) {
         const shortId = rawData.split(':').pop();
         rawData = await c.env.JULES_NOTIFICATIONS_KV?.get(`cb:${shortId}`) || 'error:expired:data';
     }
-
     const [action, ...args] = rawData.split(':');
-    const id = args[0]; // sessionId
-    const subId = args[1]; // index
+    const id = args[0];
+    const subId = args[1];
 
     if (action === 'view') {
       try {
@@ -262,7 +266,6 @@ app.post('/webhook', async (c) => {
           .text('📋 Activities', `activities:${id}`).row()
           .text('✅ View Plan', `plan_view:${id}`)
           .text('🔙 List', 'sessions_back');
-
         await ctx.editMessageText(
           `**Session:** ${title}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n**Source:** \`${session.sourceContext?.source || 'Unknown'}\`\n\n💡 _Reply to this to chat._`,
           { parse_mode: 'Markdown', reply_markup: keyboard }
@@ -281,7 +284,7 @@ app.post('/webhook', async (c) => {
           const { activities } = await jules.getAllActivities(id);
           const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
           const keyboard = new InlineKeyboard();
-          let listText = `**Recent Activities** (Latest first)\nID: \`${id}\`\n\n`;
+          let listText = `**Recent Activities**\nID: \`${id}\`\n\n`;
           const items = filtered.slice(-5).reverse();
           for (let i=0; i<items.length; i++) {
               const a = items[i];
@@ -331,7 +334,6 @@ app.post('/webhook', async (c) => {
     }
   });
 
-  // Set default commands menu
   bot.api.setMyCommands([
     { command: "sessions", description: "View recent sessions" },
     { command: "new", description: "Start a new coding task" },
