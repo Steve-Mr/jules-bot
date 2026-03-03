@@ -1,0 +1,44 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches:
+      - main
+  repository_dispatch:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Inject Secrets into wrangler.toml
+        run: |
+          # Use | as delimiter for sed to avoid issues with / in Cron expressions
+
+          # 1. Handle KV Namespace if secret exists
+          if [ -n "${{ secrets.JULES_KV_ID }}" ]; then
+            echo "Injecting KV ID..."
+            sed -i 's|# \[\[kv_namespaces\]\]|[[kv_namespaces]]|' wrangler.toml
+            sed -i 's|# binding = "JULES_NOTIFICATIONS_KV"|binding = "JULES_NOTIFICATIONS_KV"|' wrangler.toml
+            sed -i 's|# id = "__KV_ID__"|id = "${{ secrets.JULES_KV_ID }}"|' wrangler.toml
+          fi
+
+          # 2. Handle Cron Trigger if secret exists
+          if [ -n "${{ secrets.JULES_CRON }}" ]; then
+            echo "Injecting Cron Schedule..."
+            sed -i 's|# \[triggers\]|[triggers]|' wrangler.toml
+            sed -i 's|# crons = \["__CRON_SCHEDULE__"\]|crons = ["${{ secrets.JULES_CRON }}"]|' wrangler.toml
+          fi
+
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
