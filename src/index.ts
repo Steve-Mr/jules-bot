@@ -4,6 +4,12 @@ import { Env, JulesClient, CreateSessionOptions } from './lib/jules';
 
 const app = new Hono<{ Bindings: Env }>();
 
+// --- Wizard Types ---
+
+interface WizardState extends CreateSessionOptions {
+    source: string;
+}
+
 // --- Helpers ---
 
 async function sendLongMessage(bot: Bot, chatId: string | number, text: string, options: any = {}) {
@@ -56,7 +62,6 @@ function formatPlan(activities: any[]): string {
     return getSummary(planActivity);
 }
 
-// Map long callback data to short KV keys if needed
 async function getCallbackData(env: Env, prefix: string, sid: string, sub: string): Promise<string> {
     const full = `${prefix}:${sid}:${sub}`;
     if (full.length <= 64) return full;
@@ -66,7 +71,22 @@ async function getCallbackData(env: Env, prefix: string, sid: string, sub: strin
     return `cb_map:${shortId}`;
 }
 
-// --- Scheduled Task (Refactored for CPU Efficiency & Sensitivity) ---
+// Wizard helpers
+async function saveWizardState(env: Env, state: WizardState): Promise<string> {
+    const wizId = Math.random().toString(36).substring(2, 10);
+    if (env.JULES_NOTIFICATIONS_KV) {
+        await env.JULES_NOTIFICATIONS_KV.put(`wiz:${wizId}`, JSON.stringify(state), { expirationTtl: 1800 });
+    }
+    return wizId;
+}
+
+async function getWizardState(env: Env, wizId: string): Promise<WizardState | null> {
+    if (!env.JULES_NOTIFICATIONS_KV) return null;
+    const raw = await env.JULES_NOTIFICATIONS_KV.get(`wiz:${wizId}`);
+    return raw ? JSON.parse(raw) : null;
+}
+
+// --- Scheduled Task ---
 
 export async function handleScheduled(env: Env) {
   if (!env.JULES_NOTIFICATIONS_KV || !env.TELEGRAM_TOKEN || !env.ADMIN_USER_ID) return;
@@ -77,49 +97,33 @@ export async function handleScheduled(env: Env) {
   try {
     const { sessions } = await jules.listSessions();
     if (!sessions) return;
-
     for (const session of sessions) {
       const sessionId = session.name.split('/').pop();
-      const currentUpdateTime = session.updateTime; // standard field in API
-
-      // 1. FAST PATH: Skip if Session hasn't been updated since last notification
+      const currentUpdateTime = session.updateTime;
       const lastKnownUpdateTime = await env.JULES_NOTIFICATIONS_KV.get(`last_update_time:${sessionId}`);
       if (lastKnownUpdateTime === currentUpdateTime) continue;
 
-      // 2. FETCH LATEST ACTIVITIES (One page only to save CPU)
       const { activities } = await jules.getActivities(sessionId);
       if (!activities || activities.length === 0) continue;
 
       const lastNotifiedActivityId = await env.JULES_NOTIFICATIONS_KV.get(`last_activity_id:${sessionId}`);
-
-      // 3. SCAN FOR NEW SIGNIFICANT EVENTS
-      // Find where we left off
       const lastSeenIdx = activities.findIndex((a: any) => a.name === lastNotifiedActivityId);
-      // New activities are those AFTER the last seen one
       const newActivities = lastSeenIdx === -1 ? [activities[activities.length - 1]] : activities.slice(lastSeenIdx + 1);
 
       const significantTypes = ['PLAN_GENERATED', 'SESSION_COMPLETED', 'SESSION_FAILED', 'AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'];
-
       for (const act of newActivities) {
-          // If the activity itself is significant OR the session entered a wait state
-          const isSig = significantTypes.includes(act.type) ||
-                        ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'].includes(session.state);
-
-          // Filter out progress noise even if state is waiting
+          const isSig = significantTypes.includes(act.type) || ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'].includes(session.state);
           if (isSig && act.type !== 'PROGRESS_UPDATED') {
               await bot.api.sendMessage(adminId,
-                `🔔 **New Update for ${session.title || session.displayName || sessionId}**\n\n` +
+                `🔔 **Update: ${session.title || session.displayName || sessionId}**\n\n` +
                 `**Status:** \`${session.state}\`\n` +
                 `**Event:** ${getFriendlyType(act.type)}\n${getSummary(act)}\n\n` +
                 `Use /sessions to manage.`,
                 { parse_mode: 'Markdown' }
               );
-              // Break after first notification to prevent spam if multiple events happened
               break;
           }
       }
-
-      // 4. PERSIST STATE
       await env.JULES_NOTIFICATIONS_KV.put(`last_update_time:${sessionId}`, currentUpdateTime);
       await env.JULES_NOTIFICATIONS_KV.put(`last_activity_id:${sessionId}`, activities[activities.length - 1].name);
     }
@@ -152,7 +156,7 @@ app.post('/webhook', async (c) => {
       report += `✅ API Key: ${c.env.JULES_API_KEY ? 'Configured' : '❌ MISSING'}\n`;
       report += `✅ Bot Token: ${c.env.TELEGRAM_TOKEN ? 'Configured' : '❌ MISSING'}\n`;
       if (c.env.JULES_NOTIFICATIONS_KV) {
-          try { await c.env.JULES_NOTIFICATIONS_KV.put('check_v4', 'ok'); report += `✅ KV Storage: Working\n`; }
+          try { await c.env.JULES_NOTIFICATIONS_KV.put('check_v5', 'ok'); report += `✅ KV Storage: Working\n`; }
           catch (e: any) { report += `❌ KV Storage: Failed (${e.message})\n`; }
       } else report += `ℹ️ KV Storage: Not bound\n`;
       try { await jules.listSources(); report += `✅ Jules API: Connected\n`; }
@@ -180,9 +184,9 @@ app.post('/webhook', async (c) => {
       const keyboard = new InlineKeyboard();
       sources.slice(0, 8).forEach((src: any) => {
         const name = src.name.split('/').pop();
-        keyboard.text(name, `create_select:${src.name}`).row();
+        keyboard.text(name, `wiz_repo:${src.name}`).row();
       });
-      await ctx.reply('Select a repository:', { reply_markup: keyboard });
+      await ctx.reply('🚀 Step 1: Select a repository:', { reply_markup: keyboard });
     } catch (e: any) { await ctx.reply(`❌ Error: ${e.message}`); }
   });
 
@@ -223,16 +227,22 @@ app.post('/webhook', async (c) => {
   bot.on('message:text', async (ctx, next) => {
     const text = ctx.message.text;
     const replyTo = ctx.message.reply_to_message;
-    if (replyTo?.text?.includes('已选择仓库') || replyTo?.text?.includes('Select repo:')) {
-        const repoMatch = replyTo.text.match(/`([^`]+)`/);
-        if (repoMatch) {
-            try {
-                const session = await jules.createSession(repoMatch[1], text, { requirePlanApproval: true });
-                const sid = session.name.split('/').pop();
-                return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Interactive Mode)`);
-            } catch (e: any) { return ctx.reply(`❌ Failed: ${e.message}`); }
+
+    // Pattern 1: Wizard Confirmation (ForceReply)
+    if (replyTo?.text?.includes('READY TO START') || replyTo?.text?.includes('向导已就绪')) {
+        const wizMatch = replyTo.text.match(/WizID:\s*`?([a-z0-9]+)`?/i);
+        if (wizMatch) {
+            const state = await getWizardState(c.env, wizMatch[1]);
+            if (state) {
+                try {
+                    const session = await jules.createSession(state.source, text, state);
+                    const sid = session.name.split('/').pop();
+                    return ctx.reply(`🚀 Session started! ID: \`${sid}\` (${state.requirePlanApproval ? 'Interactive' : 'Auto'})`);
+                } catch (e: any) { return ctx.reply(`❌ Failed: ${e.message}`); }
+            }
         }
     }
+
     if (replyTo) {
       const msgText = replyTo.text || replyTo.caption || '';
       const sidMatch = msgText.match(/(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
@@ -248,16 +258,77 @@ app.post('/webhook', async (c) => {
 
   bot.on('callback_query:data', async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
+
     let rawData = ctx.callbackQuery.data;
     if (rawData.startsWith('cb_map:')) {
         const shortId = rawData.split(':').pop();
         rawData = await c.env.JULES_NOTIFICATIONS_KV?.get(`cb:${shortId}`) || 'error:expired:data';
     }
+
     const [action, ...args] = rawData.split(':');
     const id = args[0];
     const subId = args[1];
 
-    if (action === 'view') {
+    // --- Creation Wizard Handlers ---
+
+    if (action === 'wiz_repo') {
+        const sources = await jules.listSources();
+        const source = sources.sources?.find((s: any) => s.name === id);
+        if (!source) return ctx.reply('Source not found.');
+
+        const wizId = await saveWizardState(c.env, { source: id, startingBranch: 'main' });
+        const keyboard = new InlineKeyboard();
+
+        // List branches
+        const branches = source.githubRepo?.branches || [{ displayName: 'main' }];
+        branches.slice(0, 10).forEach((b: any) => {
+            keyboard.text(b.displayName, `wiz_br:${wizId}:${b.displayName}`).row();
+        });
+
+        await ctx.editMessageText(`📂 Repository: \`${id}\`\n\n🚀 Step 2: Select target branch:`, { parse_mode: 'Markdown', reply_markup: keyboard });
+    } else if (action === 'wiz_br') {
+        const state = await getWizardState(c.env, id);
+        if (!state) return ctx.reply('Wizard session expired. Start over with /new.');
+        state.startingBranch = subId;
+        const wizId = await saveWizardState(c.env, state);
+
+        const keyboard = new InlineKeyboard()
+            .text('📋 Interactive (Recommended)', `wiz_mode:${wizId}:int`).row()
+            .text('⚡ Auto-execute', `wiz_mode:${wizId}:auto`).row();
+
+        await ctx.editMessageText(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${subId}\`\n\n🚀 Step 3: Select execution mode:`, { parse_mode: 'Markdown', reply_markup: keyboard });
+    } else if (action === 'wiz_mode') {
+        const state = await getWizardState(c.env, id);
+        if (!state) return ctx.reply('Wizard session expired.');
+        state.requirePlanApproval = (subId === 'int');
+        const wizId = await saveWizardState(c.env, state);
+
+        const keyboard = new InlineKeyboard()
+            .text('✅ Yes, create PR', `wiz_pr:${wizId}:yes`).row()
+            .text('❌ No, just finish', `wiz_pr:${wizId}:no`).row();
+
+        await ctx.editMessageText(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n\n🚀 Step 4: Auto-create Pull Request?`, { parse_mode: 'Markdown', reply_markup: keyboard });
+    } else if (action === 'wiz_pr') {
+        const state = await getWizardState(c.env, id);
+        if (!state) return ctx.reply('Wizard expired.');
+        state.automationMode = (subId === 'yes' ? 'AUTO_CREATE_PR' : 'AUTOMATION_MODE_UNSPECIFIED');
+        const wizId = await saveWizardState(c.env, state);
+
+        await ctx.reply(
+            `🚀 **向导已就绪 (READY TO START)**\n\n` +
+            `📂 仓库: \`${state.source}\`\n` +
+            `🌿 分支: \`${state.startingBranch}\`\n` +
+            `🛠 模式: \`${state.requirePlanApproval ? '交互审批' : '全自动'}\`\n` +
+            `📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? '开启' : '关闭'}\`\n` +
+            `\n**WizID:** \`${wizId}\`\n` +
+            `请**直接回复本消息**，告诉我你需要 Jules 完成的具体任务？`,
+            { parse_mode: 'Markdown', reply_markup: { force_reply: true } }
+        );
+    }
+
+    // --- Existing Management Handlers ---
+
+    else if (action === 'view') {
       try {
         const session = await jules.getSession(id);
         const title = session.title || session.displayName || id;
@@ -329,8 +400,6 @@ app.post('/webhook', async (c) => {
     } else if (action === 'approve_do') {
         try { await jules.approvePlan(id); await ctx.editMessageText(`✅ Approved for \`${id}\`.`); }
         catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
-    } else if (action === 'create_select') {
-      await ctx.reply(`已选择仓库: \`${id}\`\n\n请**直接回复本条消息**，告诉我你需要 Jules 完成什么任务？\n(支持使用 -b [分支] -a 等高级参数)`, { reply_markup: { force_reply: true } });
     }
   });
 
