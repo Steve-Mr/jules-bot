@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { Bot, webhookCallback, InlineKeyboard, GrammarError, HttpError } from 'grammy';
+import { Bot, webhookCallback, InlineKeyboard, GrammyError, HttpError } from 'grammy';
 import { Env, JulesClient, CreateSessionOptions } from './lib/jules';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -69,6 +69,7 @@ function formatPlan(activities: any[]): string {
     return getSummary(planActivity);
 }
 
+// Map long callback data to short KV keys if needed
 async function getCallbackData(env: Env, prefix: string, sid: string, sub: string): Promise<string> {
     const full = `${prefix}:${sid}:${sub}`;
     if (full.length <= 64) return full;
@@ -156,7 +157,7 @@ app.post('/webhook', async (c) => {
     const adminId = adminIds[0];
     if (adminId) {
         let errMsg = `❌ **Bot Error**\n\n`;
-        if (err instanceof GrammarError) errMsg += `Grammy: ${err.message}`;
+        if (err instanceof GrammyError) errMsg += `Grammy: ${err.message}`;
         else if (err instanceof HttpError) errMsg += `Telegram API: ${err.message}`;
         else errMsg += `Unknown: ${String(err.error)}`;
         bot.api.sendMessage(adminId, errMsg, { parse_mode: 'Markdown' }).catch(() => {});
@@ -176,7 +177,7 @@ app.post('/webhook', async (c) => {
       report += `✅ Admin ID: \`${ctx.from?.id}\`\n`;
       report += `✅ API Key: ${c.env.JULES_API_KEY ? 'OK' : '❌'}\n`;
       if (c.env.JULES_NOTIFICATIONS_KV) {
-          try { await c.env.JULES_NOTIFICATIONS_KV.put('check_v7', 'ok'); report += `✅ KV: Working\n`; }
+          try { await c.env.JULES_NOTIFICATIONS_KV.put('check_v8', 'ok'); report += `✅ KV: Working\n`; }
           catch (e: any) { report += `❌ KV: Error (${e.message})\n`; }
       } else report += `ℹ️ KV: Not bound\n`;
       try { await jules.listSources(); report += `✅ API: Connected\n`; }
