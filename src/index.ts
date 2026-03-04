@@ -415,6 +415,16 @@ app.post('/webhook', async (c) => {
     } else if (action === 'approve_do') {
         try { await jules.approvePlan(id); await ctx.editMessageText(`✅ Approved for \`${id}\`.`); }
         catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
+    } else if (action === 'sessions_back') {
+        // Reuse sessions command logic
+        const { sessions } = await jules.listSessions();
+        if (!sessions || sessions.length === 0) return ctx.editMessageText('No active sessions.');
+        const keyboard = new InlineKeyboard();
+        sessions.slice(0, 10).forEach((s: any) => {
+            const id = s.name.split('/').pop();
+            keyboard.text(`📝 ${s.title || s.displayName || id}`, `view:${id}`).row();
+        });
+        await ctx.editMessageText('Recent Sessions:', { reply_markup: keyboard });
     }
   });
 
