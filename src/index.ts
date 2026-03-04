@@ -216,19 +216,30 @@ app.post('/webhook', async (c) => {
     } catch (e: any) { await ctx.reply(`❌ Error: ${e.message}`); }
   });
 
-  bot.command('new', async (ctx) => {
+  const showRepoList = async (ctx: any, pageToken?: string) => {
     try {
-      const { sources } = await jules.listSources();
+      const { sources, nextPageToken } = await jules.listSources({ pageSize: 8, pageToken });
       if (!sources || sources.length === 0) return ctx.reply('No repositories found.');
       const keyboard = new InlineKeyboard();
-      for (const src of sources.slice(0, 8)) {
+      for (const src of sources) {
           const name = src.name.split('/').pop();
           const cb = await getCallbackData(c.env, 'wiz_repo', '', src.name);
           keyboard.text(name, cb).row();
       }
-      await ctx.reply('🚀 Step 1: Select a repository:', { reply_markup: keyboard });
+      const navRow = [];
+      if (nextPageToken) {
+          const nextCb = await getCallbackData(c.env, 'wiz_repo_page', '', nextPageToken);
+          navRow.push(InlineKeyboard.text('Next ➡️', nextCb));
+      }
+      if (navRow.length > 0) keyboard.row(...navRow);
+
+      const text = '🚀 Step 1: Select a repository:';
+      if (ctx.callbackQuery) await ctx.editMessageText(text, { reply_markup: keyboard });
+      else await ctx.reply(text, { reply_markup: keyboard });
     } catch (e: any) { await ctx.reply(`❌ Error: ${e.message}`); }
-  });
+  };
+
+  bot.command('new', (ctx) => showRepoList(ctx));
 
   bot.command('reply', async (ctx) => {
     const match = ctx.message?.text?.match(/\/reply\s+([^\s]+)\s+(.+)/);
@@ -316,9 +327,11 @@ app.post('/webhook', async (c) => {
     const id = args[0];
     const subId = args[1];
 
-    if (action === 'wiz_repo') {
+    if (action === 'wiz_repo_page') {
+        await showRepoList(ctx, args[2] || subId);
+    } else if (action === 'wiz_repo') {
         const targetRepo = args[2] || subId;
-        const sources = await jules.listSources();
+        const sources = await jules.listSources({ pageSize: 100 });
         const source = sources.sources?.find((s: any) => s.name === targetRepo);
         if (!source) return ctx.reply('Source not found.');
         const branches = source.githubRepo?.branches?.map((b: any) => b.displayName) || ['main'];
