@@ -15,9 +15,14 @@ interface TrackedSession {
     id: string;
     title: string;
     createTime: number; // unix timestamp
+    lastNotifiedState?: string;
 }
 
 // --- Helpers ---
+
+function escapeMarkdown(text: string): string {
+    return text.replace(/([_*\[`])/g, '\\$1');
+}
 
 async function sendLongMessage(bot: Bot, chatId: string | number, text: string, options: any = {}) {
     const CHUNK_SIZE = 4000;
@@ -93,13 +98,23 @@ async function getWizardState(env: Env, wizId: string): Promise<WizardState | nu
     return raw ? JSON.parse(raw) : null;
 }
 
-async function registerSession(env: Env, sessionId: string, title: string) {
+async function registerSession(env: Env, jules: JulesClient, sessionId: string, title?: string) {
     if (!env.JULES_NOTIFICATIONS_KV) return;
     const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
     let registry: TrackedSession[] = raw ? JSON.parse(raw) : [];
+
     // Prevent duplicate entries
     if (!registry.find(s => s.id === sessionId)) {
-        registry.push({ id: sessionId, title, createTime: Date.now() });
+        let finalTitle = title;
+        if (!finalTitle) {
+            try {
+                const session = await jules.getSession(sessionId);
+                finalTitle = session.title || session.displayName || sessionId;
+            } catch (e) {
+                finalTitle = sessionId;
+            }
+        }
+        registry.push({ id: sessionId, title: finalTitle!, createTime: Date.now() });
         await env.JULES_NOTIFICATIONS_KV.put('track:registry', JSON.stringify(registry));
     }
 }
@@ -123,17 +138,37 @@ export async function handleScheduled(env: Env) {
 
     for (const entry of registry) {
       if (now - entry.createTime > DAY_MS) continue;
+      // Skip very new entries (less than 1 minute) to avoid premature terminal-state false positives or transient initial states
+      if (now - entry.createTime < 60000) {
+          updatedRegistry.push(entry);
+          continue;
+      }
 
       try {
         const session = await jules.getSession(entry.id);
         const sigStates = ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'COMPLETED', 'FAILED'];
 
         if (sigStates.includes(session.state)) {
-            const keyboard = new InlineKeyboard().text('📋 View Details', `view:${entry.id}`).row();
-            await bot.api.sendMessage(adminId,
-              `🔔 **Jules Task Update**\n\n**Title:** ${entry.title}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
-              { parse_mode: 'Markdown', reply_markup: keyboard }
-            );
+            // Only notify if the state has changed since last notification
+            if (session.state !== entry.lastNotifiedState) {
+                const keyboard = new InlineKeyboard();
+                if (session.state === 'AWAITING_PLAN_APPROVAL') {
+                    keyboard.text('👍 Approve Plan', `approve_do:${entry.id}`).row();
+                }
+                keyboard.text('📋 View Details', `view:${entry.id}`).row();
+                await bot.api.sendMessage(adminId,
+                  `🔔 **Jules Task Update**\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
+                  { parse_mode: 'Markdown', reply_markup: keyboard }
+                );
+                entry.lastNotifiedState = session.state;
+            }
+
+            // Only remove from registry if it's a terminal state
+            if (session.state === 'COMPLETED' || session.state === 'FAILED') {
+                // Do not push back to updatedRegistry
+            } else {
+                updatedRegistry.push(entry);
+            }
         } else {
             updatedRegistry.push(entry);
         }
@@ -188,7 +223,7 @@ app.post('/webhook', async (c) => {
               if (registry.length > 0) {
                   registry.forEach(s => {
                       const ageMin = Math.round((Date.now() - s.createTime) / 60000);
-                      report += `- \`${s.id}\`: ${s.title} (${ageMin}m ago)\n`;
+                      report += `- \`${s.id}\`: ${escapeMarkdown(s.title)} (${ageMin}m ago)\n`;
                   });
               } else report += "_No sessions currently being tracked._";
           }
@@ -212,26 +247,37 @@ app.post('/webhook', async (c) => {
     } catch (e: any) { await ctx.reply(`❌ Error: ${e.message}`); }
   });
 
-  bot.command('new', async (ctx) => {
+  const showRepoList = async (ctx: any, pageToken?: string) => {
     try {
-      const { sources } = await jules.listSources();
+      const { sources, nextPageToken } = await jules.listSources({ pageSize: 8, pageToken });
       if (!sources || sources.length === 0) return ctx.reply('No repositories found.');
       const keyboard = new InlineKeyboard();
-      for (const src of sources.slice(0, 8)) {
+      for (const src of sources) {
           const name = src.name.split('/').pop();
           const cb = await getCallbackData(c.env, 'wiz_repo', '', src.name);
           keyboard.text(name, cb).row();
       }
-      await ctx.reply('🚀 Step 1: Select a repository:', { reply_markup: keyboard });
+      if (nextPageToken) {
+          const nextCb = await getCallbackData(c.env, 'wiz_repo_page', '', nextPageToken);
+          keyboard.row().text('Next ➡️', nextCb);
+      }
+
+      const text = '🚀 Step 1: Select a repository:';
+      if (ctx.callbackQuery) await ctx.editMessageText(text, { reply_markup: keyboard });
+      else await ctx.reply(text, { reply_markup: keyboard });
     } catch (e: any) { await ctx.reply(`❌ Error: ${e.message}`); }
-  });
+  };
+
+  bot.command('new', (ctx) => showRepoList(ctx));
 
   bot.command('reply', async (ctx) => {
     const match = ctx.message?.text?.match(/\/reply\s+([^\s]+)\s+(.+)/);
     if (!match) return ctx.reply('Usage: /reply [session_id] [message]');
+    const sid = match[1];
     try {
-      await jules.sendMessage(match[1], match[2]);
-      await ctx.reply(`✅ Sent to \`${match[1]}\`.`);
+      await jules.sendMessage(sid, match[2]);
+      await registerSession(c.env, jules, sid);
+      await ctx.reply(`✅ Sent to \`${sid}\`. (Now tracking)`);
     } catch (e: any) { await ctx.reply(`❌ Failed: ${e.message}`); }
   });
 
@@ -256,7 +302,7 @@ app.post('/webhook', async (c) => {
     try {
       const session = await jules.createSession(sourceName, prompt, options);
       const sessionId = session.name.split('/').pop();
-      await registerSession(c.env, sessionId, options.title || prompt.substring(0, 30));
+      await registerSession(c.env, jules, sessionId, options.title || prompt.substring(0, 30));
       await ctx.reply(`🚀 Started! ID: \`${sessionId}\``);
     } catch (e: any) { await ctx.reply(`❌ Failed: ${e.message}`); }
   });
@@ -268,27 +314,33 @@ app.post('/webhook', async (c) => {
     const replyText = replyTo?.text || replyTo?.caption || '';
 
     // Pattern 1: Wizard Confirmation (Highest priority)
-    const wizMatch = replyText.match(/WizID:\s*`?([a-z0-9]+)`?/i);
+    // Robust regex to handle potential Markdown artifacts (**, `)
+    const wizMatch = replyText.match(/(?:\*\*|__)?WizID(?:\*\*|__)?:\s*[`*_]*([a-z0-9]+)[`*_]*/i);
     if (wizMatch) {
-        const state = await getWizardState(c.env, wizMatch[1]);
+        const wizId = wizMatch[1];
+        const state = await getWizardState(c.env, wizId);
         if (state) {
             try {
                 const session = await jules.createSession(state.source, text, state);
                 const sid = session.name.split('/').pop();
-                // Ensure registration happens here
-                await registerSession(c.env, sid, state.title || text.substring(0, 30));
+                await registerSession(c.env, jules, sid, state.title || text.substring(0, 30));
                 return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Tracked)`);
             } catch (e: any) { return ctx.reply(`❌ Failed to create session: ${e.message}`); }
+        } else {
+            return ctx.reply('⚠️ Wizard session expired or not found. Please start over with /new.');
         }
     }
 
     // Pattern 2: Normal reply to a session message
     if (replyTo) {
-      const sidMatch = replyText.match(/(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
+      // Use a negative lookahead to ensure we don't accidentally match WizID as a session ID
+      const sidMatch = replyText.match(/(?<!Wiz)(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
       if (sidMatch) {
+        const sid = sidMatch[1];
         try {
-          await jules.sendMessage(sidMatch[1], text);
-          return ctx.reply(`✅ Sent to session \`${sidMatch[1]}\`.`, { reply_to_message_id: ctx.message.message_id });
+          await jules.sendMessage(sid, text);
+          await registerSession(c.env, jules, sid);
+          return ctx.reply(`✅ Sent to session \`${sid}\`. (Now tracking)`, { reply_to_message_id: ctx.message.message_id });
         } catch (e: any) { return ctx.reply(`❌ Failed to send: ${e.message}`); }
       }
     }
@@ -308,9 +360,11 @@ app.post('/webhook', async (c) => {
     const id = args[0];
     const subId = args[1];
 
-    if (action === 'wiz_repo') {
+    if (action === 'wiz_repo_page') {
+        await showRepoList(ctx, args[2] || subId);
+    } else if (action === 'wiz_repo') {
         const targetRepo = args[2] || subId;
-        const sources = await jules.listSources();
+        const sources = await jules.listSources({ pageSize: 100 });
         const source = sources.sources?.find((s: any) => s.name === targetRepo);
         if (!source) return ctx.reply('Source not found.');
         const branches = source.githubRepo?.branches?.map((b: any) => b.displayName) || ['main'];
@@ -339,13 +393,21 @@ app.post('/webhook', async (c) => {
         if (!state) return ctx.reply('Wizard expired.');
         state.automationMode = (subId === 'yes' ? 'AUTO_CREATE_PR' : 'AUTOMATION_MODE_UNSPECIFIED');
         const wizId = await saveWizardState(c.env, state);
-        await ctx.reply(`🚀 **READY TO START**\n\n📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? 'Yes' : 'No'}\`\n\n**WizID:** \`${wizId}\`\nReply with your task prompt:`, { reply_markup: { force_reply: true } });
+        await ctx.reply(`🚀 **READY TO START**\n\n📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? 'Yes' : 'No'}\`\n\n**WizID:** \`${wizId}\`\nReply with your task prompt:`, {
+            parse_mode: 'Markdown',
+            reply_markup: { force_reply: true }
+        });
     } else if (action === 'view') {
         try {
             const session = await jules.getSession(id);
             const title = session.title || session.displayName || id;
-            const keyboard = new InlineKeyboard().text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row().text('✅ View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
-            await ctx.editMessageText(`**Session:** ${title}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, { parse_mode: 'Markdown', reply_markup: keyboard });
+            const keyboard = new InlineKeyboard();
+            if (session.state === 'AWAITING_PLAN_APPROVAL') {
+                keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
+            }
+            keyboard.text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row()
+                    .text('📋 View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
+            await ctx.editMessageText(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
     } else if (action === 'activities') {
         try {
@@ -358,7 +420,7 @@ app.post('/webhook', async (c) => {
               const a = items[i];
               const time = new Date(a.createTime).toLocaleTimeString();
               const originalIdx = filtered.length - 1 - i;
-              listText += `🕒 ${time} **${getFriendlyType(a.type)}**\n${getSummary(a, false)}\n\n`;
+              listText += `🕒 ${time} **${getFriendlyType(a.type)}**\n${escapeMarkdown(getSummary(a, false))}\n\n`;
               const cb = await getCallbackData(c.env, 'act_idx', id, originalIdx.toString());
               keyboard.text(`🔍 Details: ${a.type}`, cb).row();
           }
@@ -371,7 +433,7 @@ app.post('/webhook', async (c) => {
             const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
             const activity = filtered[parseInt(subId)];
             if (!activity) return ctx.reply('Expired.');
-            const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(activity.type)}\n\n${getSummary(activity, true)}`;
+            const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(activity.type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
             const keyboard = new InlineKeyboard().text('🔙 Back', `activities:${id}`);
             if (fullContent.length <= 4000) await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' }); await ctx.reply('^ Full details above.', { reply_markup: keyboard }); }
@@ -384,13 +446,32 @@ app.post('/webhook', async (c) => {
             const keyboard = new InlineKeyboard();
             if (session.state === 'AWAITING_PLAN_APPROVAL') keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
             keyboard.text('⬅️ Back', `view:${id}`);
-            const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${planText}`;
+            const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${escapeMarkdown(planText)}`;
             if (content.length <= 4000) await ctx.editMessageText(content, { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, content, { parse_mode: 'Markdown' }); await ctx.reply('^ Plan details above.', { reply_markup: keyboard }); }
         } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
     } else if (action === 'approve_do') {
-        try { await jules.approvePlan(id); await ctx.editMessageText(`✅ Approved for \`${id}\`.`); }
+        try {
+            await jules.approvePlan(id);
+            await registerSession(c.env, jules, id);
+            // Refresh the view to show updated status
+            const session = await jules.getSession(id);
+            const title = session.title || session.displayName || id;
+            const keyboard = new InlineKeyboard().text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row()
+                    .text('📋 View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
+            await ctx.editMessageText(`✅ Approved! Current status: \`${session.state}\`\n\n**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\``, { parse_mode: 'Markdown', reply_markup: keyboard });
+        }
         catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
+    } else if (action === 'sessions_back') {
+        // Reuse sessions command logic
+        const { sessions } = await jules.listSessions();
+        if (!sessions || sessions.length === 0) return ctx.editMessageText('No active sessions.');
+        const keyboard = new InlineKeyboard();
+        sessions.slice(0, 10).forEach((s: any) => {
+            const id = s.name.split('/').pop();
+            keyboard.text(`📝 ${s.title || s.displayName || id}`, `view:${id}`).row();
+        });
+        await ctx.editMessageText('Recent Sessions:', { reply_markup: keyboard });
     }
   });
 

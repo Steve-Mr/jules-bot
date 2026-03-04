@@ -41,8 +41,12 @@ export class JulesClient {
     return response.json();
   }
 
-  async listSources() {
-    return this.fetch('/sources');
+  async listSources(options: { pageSize?: number; pageToken?: string } = {}) {
+    const params = new URLSearchParams();
+    if (options.pageSize) params.append('pageSize', options.pageSize.toString());
+    if (options.pageToken) params.append('pageToken', options.pageToken);
+    const query = params.toString();
+    return this.fetch(`/sources${query ? `?${query}` : ''}`);
   }
 
   async listSessions() {
