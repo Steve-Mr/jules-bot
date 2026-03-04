@@ -15,6 +15,7 @@ interface TrackedSession {
     id: string;
     title: string;
     createTime: number; // unix timestamp
+    lastNotifiedState?: string;
 }
 
 // --- Helpers ---
@@ -137,21 +138,37 @@ export async function handleScheduled(env: Env) {
 
     for (const entry of registry) {
       if (now - entry.createTime > DAY_MS) continue;
+      // Skip very new entries (less than 1 minute) to avoid premature terminal-state false positives or transient initial states
+      if (now - entry.createTime < 60000) {
+          updatedRegistry.push(entry);
+          continue;
+      }
 
       try {
         const session = await jules.getSession(entry.id);
         const sigStates = ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'COMPLETED', 'FAILED'];
 
         if (sigStates.includes(session.state)) {
-            const keyboard = new InlineKeyboard();
-            if (session.state === 'AWAITING_PLAN_APPROVAL') {
-                keyboard.text('👍 Approve Plan', `approve_do:${entry.id}`).row();
+            // Only notify if the state has changed since last notification
+            if (session.state !== entry.lastNotifiedState) {
+                const keyboard = new InlineKeyboard();
+                if (session.state === 'AWAITING_PLAN_APPROVAL') {
+                    keyboard.text('👍 Approve Plan', `approve_do:${entry.id}`).row();
+                }
+                keyboard.text('📋 View Details', `view:${entry.id}`).row();
+                await bot.api.sendMessage(adminId,
+                  `🔔 **Jules Task Update**\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
+                  { parse_mode: 'Markdown', reply_markup: keyboard }
+                );
+                entry.lastNotifiedState = session.state;
             }
-            keyboard.text('📋 View Details', `view:${entry.id}`).row();
-            await bot.api.sendMessage(adminId,
-              `🔔 **Jules Task Update**\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
-              { parse_mode: 'Markdown', reply_markup: keyboard }
-            );
+
+            // Only remove from registry if it's a terminal state
+            if (session.state === 'COMPLETED' || session.state === 'FAILED') {
+                // Do not push back to updatedRegistry
+            } else {
+                updatedRegistry.push(entry);
+            }
         } else {
             updatedRegistry.push(entry);
         }
@@ -240,12 +257,10 @@ app.post('/webhook', async (c) => {
           const cb = await getCallbackData(c.env, 'wiz_repo', '', src.name);
           keyboard.text(name, cb).row();
       }
-      const navRow = [];
       if (nextPageToken) {
           const nextCb = await getCallbackData(c.env, 'wiz_repo_page', '', nextPageToken);
-          navRow.push(InlineKeyboard.text('Next ➡️', nextCb));
+          keyboard.row().text('Next ➡️', nextCb);
       }
-      if (navRow.length > 0) keyboard.row(...navRow);
 
       const text = '🚀 Step 1: Select a repository:';
       if (ctx.callbackQuery) await ctx.editMessageText(text, { reply_markup: keyboard });
