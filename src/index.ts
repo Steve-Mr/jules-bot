@@ -97,13 +97,23 @@ async function getWizardState(env: Env, wizId: string): Promise<WizardState | nu
     return raw ? JSON.parse(raw) : null;
 }
 
-async function registerSession(env: Env, sessionId: string, title: string) {
+async function registerSession(env: Env, jules: JulesClient, sessionId: string, title?: string) {
     if (!env.JULES_NOTIFICATIONS_KV) return;
     const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
     let registry: TrackedSession[] = raw ? JSON.parse(raw) : [];
+
     // Prevent duplicate entries
     if (!registry.find(s => s.id === sessionId)) {
-        registry.push({ id: sessionId, title, createTime: Date.now() });
+        let finalTitle = title;
+        if (!finalTitle) {
+            try {
+                const session = await jules.getSession(sessionId);
+                finalTitle = session.title || session.displayName || sessionId;
+            } catch (e) {
+                finalTitle = sessionId;
+            }
+        }
+        registry.push({ id: sessionId, title: finalTitle!, createTime: Date.now() });
         await env.JULES_NOTIFICATIONS_KV.put('track:registry', JSON.stringify(registry));
     }
 }
@@ -248,9 +258,11 @@ app.post('/webhook', async (c) => {
   bot.command('reply', async (ctx) => {
     const match = ctx.message?.text?.match(/\/reply\s+([^\s]+)\s+(.+)/);
     if (!match) return ctx.reply('Usage: /reply [session_id] [message]');
+    const sid = match[1];
     try {
-      await jules.sendMessage(match[1], match[2]);
-      await ctx.reply(`✅ Sent to \`${match[1]}\`.`);
+      await jules.sendMessage(sid, match[2]);
+      await registerSession(c.env, jules, sid);
+      await ctx.reply(`✅ Sent to \`${sid}\`. (Now tracking)`);
     } catch (e: any) { await ctx.reply(`❌ Failed: ${e.message}`); }
   });
 
@@ -275,7 +287,7 @@ app.post('/webhook', async (c) => {
     try {
       const session = await jules.createSession(sourceName, prompt, options);
       const sessionId = session.name.split('/').pop();
-      await registerSession(c.env, sessionId, options.title || prompt.substring(0, 30));
+      await registerSession(c.env, jules, sessionId, options.title || prompt.substring(0, 30));
       await ctx.reply(`🚀 Started! ID: \`${sessionId}\``);
     } catch (e: any) { await ctx.reply(`❌ Failed: ${e.message}`); }
   });
@@ -296,7 +308,7 @@ app.post('/webhook', async (c) => {
             try {
                 const session = await jules.createSession(state.source, text, state);
                 const sid = session.name.split('/').pop();
-                await registerSession(c.env, sid, state.title || text.substring(0, 30));
+                await registerSession(c.env, jules, sid, state.title || text.substring(0, 30));
                 return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Tracked)`);
             } catch (e: any) { return ctx.reply(`❌ Failed to create session: ${e.message}`); }
         } else {
@@ -309,9 +321,11 @@ app.post('/webhook', async (c) => {
       // Use a negative lookahead to ensure we don't accidentally match WizID as a session ID
       const sidMatch = replyText.match(/(?<!Wiz)(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
       if (sidMatch) {
+        const sid = sidMatch[1];
         try {
-          await jules.sendMessage(sidMatch[1], text);
-          return ctx.reply(`✅ Sent to session \`${sidMatch[1]}\`.`, { reply_to_message_id: ctx.message.message_id });
+          await jules.sendMessage(sid, text);
+          await registerSession(c.env, jules, sid);
+          return ctx.reply(`✅ Sent to session \`${sid}\`. (Now tracking)`, { reply_to_message_id: ctx.message.message_id });
         } catch (e: any) { return ctx.reply(`❌ Failed to send: ${e.message}`); }
       }
     }
@@ -424,6 +438,7 @@ app.post('/webhook', async (c) => {
     } else if (action === 'approve_do') {
         try {
             await jules.approvePlan(id);
+            await registerSession(c.env, jules, id);
             // Refresh the view to show updated status
             const session = await jules.getSession(id);
             const title = session.title || session.displayName || id;
