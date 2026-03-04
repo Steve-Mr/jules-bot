@@ -19,6 +19,10 @@ interface TrackedSession {
 
 // --- Helpers ---
 
+function escapeMarkdown(text: string): string {
+    return text.replace(/([_*\[`])/g, '\\$1');
+}
+
 async function sendLongMessage(bot: Bot, chatId: string | number, text: string, options: any = {}) {
     const CHUNK_SIZE = 4000;
     for (let i = 0; i < text.length; i += CHUNK_SIZE) {
@@ -131,7 +135,7 @@ export async function handleScheduled(env: Env) {
         if (sigStates.includes(session.state)) {
             const keyboard = new InlineKeyboard().text('📋 View Details', `view:${entry.id}`).row();
             await bot.api.sendMessage(adminId,
-              `🔔 **Jules Task Update**\n\n**Title:** ${entry.title}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
+              `🔔 **Jules Task Update**\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
               { parse_mode: 'Markdown', reply_markup: keyboard }
             );
         } else {
@@ -188,7 +192,7 @@ app.post('/webhook', async (c) => {
               if (registry.length > 0) {
                   registry.forEach(s => {
                       const ageMin = Math.round((Date.now() - s.createTime) / 60000);
-                      report += `- \`${s.id}\`: ${s.title} (${ageMin}m ago)\n`;
+                      report += `- \`${s.id}\`: ${escapeMarkdown(s.title)} (${ageMin}m ago)\n`;
                   });
               } else report += "_No sessions currently being tracked._";
           }
@@ -352,7 +356,7 @@ app.post('/webhook', async (c) => {
             const session = await jules.getSession(id);
             const title = session.title || session.displayName || id;
             const keyboard = new InlineKeyboard().text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row().text('✅ View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
-            await ctx.editMessageText(`**Session:** ${title}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, { parse_mode: 'Markdown', reply_markup: keyboard });
+            await ctx.editMessageText(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
     } else if (action === 'activities') {
         try {
@@ -365,7 +369,7 @@ app.post('/webhook', async (c) => {
               const a = items[i];
               const time = new Date(a.createTime).toLocaleTimeString();
               const originalIdx = filtered.length - 1 - i;
-              listText += `🕒 ${time} **${getFriendlyType(a.type)}**\n${getSummary(a, false)}\n\n`;
+              listText += `🕒 ${time} **${getFriendlyType(a.type)}**\n${escapeMarkdown(getSummary(a, false))}\n\n`;
               const cb = await getCallbackData(c.env, 'act_idx', id, originalIdx.toString());
               keyboard.text(`🔍 Details: ${a.type}`, cb).row();
           }
@@ -378,7 +382,7 @@ app.post('/webhook', async (c) => {
             const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
             const activity = filtered[parseInt(subId)];
             if (!activity) return ctx.reply('Expired.');
-            const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(activity.type)}\n\n${getSummary(activity, true)}`;
+            const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(activity.type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
             const keyboard = new InlineKeyboard().text('🔙 Back', `activities:${id}`);
             if (fullContent.length <= 4000) await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' }); await ctx.reply('^ Full details above.', { reply_markup: keyboard }); }
@@ -391,7 +395,7 @@ app.post('/webhook', async (c) => {
             const keyboard = new InlineKeyboard();
             if (session.state === 'AWAITING_PLAN_APPROVAL') keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
             keyboard.text('⬅️ Back', `view:${id}`);
-            const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${planText}`;
+            const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${escapeMarkdown(planText)}`;
             if (content.length <= 4000) await ctx.editMessageText(content, { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, content, { parse_mode: 'Markdown' }); await ctx.reply('^ Plan details above.', { reply_markup: keyboard }); }
         } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
