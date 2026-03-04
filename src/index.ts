@@ -133,7 +133,11 @@ export async function handleScheduled(env: Env) {
         const sigStates = ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'COMPLETED', 'FAILED'];
 
         if (sigStates.includes(session.state)) {
-            const keyboard = new InlineKeyboard().text('📋 View Details', `view:${entry.id}`).row();
+            const keyboard = new InlineKeyboard();
+            if (session.state === 'AWAITING_PLAN_APPROVAL') {
+                keyboard.text('👍 Approve Plan', `approve_do:${entry.id}`).row();
+            }
+            keyboard.text('📋 View Details', `view:${entry.id}`).row();
             await bot.api.sendMessage(adminId,
               `🔔 **Jules Task Update**\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
               { parse_mode: 'Markdown', reply_markup: keyboard }
@@ -368,7 +372,12 @@ app.post('/webhook', async (c) => {
         try {
             const session = await jules.getSession(id);
             const title = session.title || session.displayName || id;
-            const keyboard = new InlineKeyboard().text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row().text('✅ View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
+            const keyboard = new InlineKeyboard();
+            if (session.state === 'AWAITING_PLAN_APPROVAL') {
+                keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
+            }
+            keyboard.text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row()
+                    .text('📋 View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
             await ctx.editMessageText(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
     } else if (action === 'activities') {
@@ -413,7 +422,15 @@ app.post('/webhook', async (c) => {
             else { await sendLongMessage(bot, ctx.chat!.id, content, { parse_mode: 'Markdown' }); await ctx.reply('^ Plan details above.', { reply_markup: keyboard }); }
         } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
     } else if (action === 'approve_do') {
-        try { await jules.approvePlan(id); await ctx.editMessageText(`✅ Approved for \`${id}\`.`); }
+        try {
+            await jules.approvePlan(id);
+            // Refresh the view to show updated status
+            const session = await jules.getSession(id);
+            const title = session.title || session.displayName || id;
+            const keyboard = new InlineKeyboard().text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row()
+                    .text('📋 View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
+            await ctx.editMessageText(`✅ Approved! Current status: \`${session.state}\`\n\n**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\``, { parse_mode: 'Markdown', reply_markup: keyboard });
+        }
         catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
     } else if (action === 'sessions_back') {
         // Reuse sessions command logic
