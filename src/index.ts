@@ -302,8 +302,9 @@ app.post('/webhook', async (c) => {
 
     // Pattern 2: Normal reply to a session message
     if (replyTo) {
-      // Use multiple patterns to robustly extract session ID
-      // Prioritize ID: field, then generic "session <ID>", then fallback to Session: (avoiding WizID)
+      // Use multiple patterns to robustly extract session ID.
+      // Use a negative lookbehind (?<!Wiz) to ensure we don't accidentally match WizID as a session ID.
+      // Prioritize ID: field, then generic "session <ID>", then fallback to Session:
       const sidPatterns = [
         /(?<!Wiz)(?:\*\*|__)?ID(?:\*\*|__)?\s*[:：]\s*[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i,
         /(?<!Wiz)(?:\*\*|__)?ID(?:\*\*|__)?\s*(?:\*\*|__)?[:：](?:\*\*|__)?\s*[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i,
