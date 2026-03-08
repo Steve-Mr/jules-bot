@@ -333,8 +333,9 @@ app.post('/webhook', async (c) => {
 
     // Pattern 2: Normal reply to a session message
     if (replyTo) {
-      // Use a negative lookahead to ensure we don't accidentally match WizID as a session ID
-      const sidMatch = replyText.match(/(?<!Wiz)(?:Session|ID):\s*`?([0-9a-zA-Z_-]+)`?/i);
+      // Use a negative lookbehind to ensure we don't accidentally match WizID as a session ID
+      // Robust regex to handle potential Markdown artifacts around the ID
+      const sidMatch = replyText.match(/(?<!Wiz)(?:Session|ID):\s*[`*_]*([0-9a-zA-Z_-]+)[`*_]*/i);
       if (sidMatch) {
         const sid = sidMatch[1];
         try {
