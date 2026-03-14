@@ -14,6 +14,39 @@ export interface CreateSessionOptions {
   automationMode?: 'AUTO_CREATE_PR' | 'AUTOMATION_MODE_UNSPECIFIED';
 }
 
+export interface Session {
+  name: string;
+  id: string;
+  prompt: string;
+  title?: string;
+  displayName?: string;
+  state: string;
+  url?: string;
+  createTime: string;
+  updateTime: string;
+}
+
+export interface Activity {
+  name: string;
+  id: string;
+  type?: string; // Some internal types use 'type'
+  originator: string;
+  description: string;
+  createTime: string;
+  planGenerated?: { plan: any };
+  userMessaged?: { userMessage: string };
+  agentMessaged?: { agentMessage: string };
+  progressUpdated?: { description: string };
+}
+
+export interface Source {
+  name: string;
+  id: string;
+  githubRepo?: {
+    branches?: { displayName: string }[];
+  };
+}
+
 export class JulesClient {
   private baseUrl = 'https://jules.googleapis.com/v1alpha';
   private apiKey: string;
@@ -22,7 +55,7 @@ export class JulesClient {
     this.apiKey = apiKey;
   }
 
-  private async fetch(path: string, options: RequestInit = {}) {
+  private async fetch<T>(path: string, options: RequestInit = {}): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const response = await fetch(url, {
       ...options,
@@ -38,27 +71,27 @@ export class JulesClient {
       throw new Error(`Jules API Error: ${response.status} ${error}`);
     }
 
-    return response.json();
+    return response.json() as Promise<T>;
   }
 
-  async listSources(options: { pageSize?: number; pageToken?: string } = {}) {
+  async listSources(options: { pageSize?: number; pageToken?: string } = {}): Promise<{ sources: Source[], nextPageToken?: string }> {
     const params = new URLSearchParams();
     if (options.pageSize) params.append('pageSize', options.pageSize.toString());
     if (options.pageToken) params.append('pageToken', options.pageToken);
     const query = params.toString();
-    return this.fetch(`/sources${query ? `?${query}` : ''}`);
+    return this.fetch<{ sources: Source[], nextPageToken?: string }>(`/sources${query ? `?${query}` : ''}`);
   }
 
-  async listSessions() {
-    return this.fetch('/sessions');
+  async listSessions(): Promise<{ sessions: Session[], nextPageToken?: string }> {
+    return this.fetch<{ sessions: Session[], nextPageToken?: string }>('/sessions');
   }
 
-  async getSession(id: string) {
-    return this.fetch(`/sessions/${id}`);
+  async getSession(id: string): Promise<Session> {
+    return this.fetch<Session>(`/sessions/${id}`);
   }
 
-  async createSession(sourceName: string, prompt: string, options: CreateSessionOptions = {}) {
-    return this.fetch('/sessions', {
+  async createSession(sourceName: string, prompt: string, options: CreateSessionOptions = {}): Promise<Session> {
+    return this.fetch<Session>('/sessions', {
       method: 'POST',
       body: JSON.stringify({
         prompt: prompt,
@@ -75,32 +108,33 @@ export class JulesClient {
     });
   }
 
-  async sendMessage(sessionId: string, message: string) {
-    return this.fetch(`/sessions/${sessionId}:sendMessage`, {
+  async sendMessage(sessionId: string, message: string): Promise<void> {
+    return this.fetch<void>(`/sessions/${sessionId}:sendMessage`, {
       method: 'POST',
       body: JSON.stringify({ prompt: message }),
     });
   }
 
-  async approvePlan(sessionId: string) {
-    return this.fetch(`/sessions/${sessionId}:approvePlan`, {
+  async approvePlan(sessionId: string): Promise<void> {
+    return this.fetch<void>(`/sessions/${sessionId}:approvePlan`, {
       method: 'POST',
+      body: JSON.stringify({}),
     });
   }
 
-  async getActivities(sessionId: string, pageToken?: string) {
+  async getActivities(sessionId: string, pageToken?: string): Promise<{ activities: Activity[], nextPageToken?: string }> {
     const path = `/sessions/${sessionId}/activities?pageSize=50${pageToken ? `&pageToken=${pageToken}` : ''}`;
-    return this.fetch(path);
+    return this.fetch<{ activities: Activity[], nextPageToken?: string }>(path);
   }
 
   /**
    * Limit to 3 pages to save resources and reduce latency
    */
-  async getAllActivities(sessionId: string) {
-      let all: any[] = [];
+  async getAllActivities(sessionId: string): Promise<{ activities: Activity[] }> {
+      let all: Activity[] = [];
       let token: string | undefined = undefined;
       for (let i = 0; i < 3; i++) {
-          const res: any = await this.getActivities(sessionId, token);
+          const res = await this.getActivities(sessionId, token);
           if (res.activities) {
               all = all.concat(res.activities);
           }
