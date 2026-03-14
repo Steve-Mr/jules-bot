@@ -11,6 +11,7 @@ export interface CreateSessionOptions {
   title?: string;
   startingBranch?: string;
   requirePlanApproval?: boolean;
+  enableMessagesEveryTurn?: boolean;
   automationMode?: 'AUTO_CREATE_PR' | 'AUTOMATION_MODE_UNSPECIFIED';
 }
 
@@ -22,7 +23,7 @@ export class JulesClient {
     this.apiKey = apiKey;
   }
 
-  private async fetch(path: string, options: RequestInit = {}) {
+  private async fetch(path: string, options: RequestInit = {}): Promise<any> {
     const url = `${this.baseUrl}${path}`;
     const response = await fetch(url, {
       ...options,
@@ -70,6 +71,7 @@ export class JulesClient {
           }
         },
         requirePlanApproval: options.requirePlanApproval ?? false,
+        enableMessagesEveryTurn: options.enableMessagesEveryTurn ?? false,
         automationMode: options.automationMode || 'AUTOMATION_MODE_UNSPECIFIED'
       }),
     });

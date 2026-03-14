@@ -290,6 +290,10 @@ app.post('/webhook', async (c) => {
     for (let i = 2; i < parts.length; i++) {
         const p = parts[i];
         if (p === '-i' || p === '--interactive') options.requirePlanApproval = true;
+        else if (p === '-di' || p === '--deep-interactive') {
+            options.requirePlanApproval = true;
+            options.enableMessagesEveryTurn = true;
+        }
         else if (p === '-a' || p === '--auto-pr') options.automationMode = 'AUTO_CREATE_PR';
         else if (p === '-b' || p === '--branch') options.startingBranch = parts[++i];
         else if (p === '-t' || p === '--title') {
@@ -361,6 +365,12 @@ app.post('/webhook', async (c) => {
     const id = args[0];
     const subId = args[1];
 
+    const getModeLabel = (state: WizardState) => {
+        if (state.enableMessagesEveryTurn) return 'Interactive Plan (Deep)';
+        if (state.requirePlanApproval) return 'Interactive (Standard)';
+        return 'Auto';
+    };
+
     if (action === 'wiz_repo_page') {
         await showRepoList(ctx, args[2] || subId);
     } else if (action === 'wiz_repo') {
@@ -380,21 +390,25 @@ app.post('/webhook', async (c) => {
         if (!state || !state.branches) return ctx.reply('Wizard expired. Start over with /new.');
         state.startingBranch = state.branches[parseInt(subId)];
         const wizId = await saveWizardState(c.env, state);
-        const keyboard = new InlineKeyboard().text('📋 Interactive', `wiz_mode:${wizId}:int`).row().text('⚡ Auto', `wiz_mode:${wizId}:auto`).row();
+        const keyboard = new InlineKeyboard()
+            .text('📋 Interactive Plan (Deep)', `wiz_mode:${wizId}:deep`).row()
+            .text('📋 Standard Interactive', `wiz_mode:${wizId}:int`).row()
+            .text('⚡ Auto', `wiz_mode:${wizId}:auto`).row();
         await ctx.editMessageText(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n\n🚀 Step 3: Select mode:`, { parse_mode: 'Markdown', reply_markup: keyboard });
     } else if (action === 'wiz_mode') {
         const state = await getWizardState(c.env, id);
         if (!state) return ctx.reply('Wizard expired.');
-        state.requirePlanApproval = (subId === 'int');
+        state.requirePlanApproval = (subId === 'int' || subId === 'deep');
+        state.enableMessagesEveryTurn = (subId === 'deep');
         const wizId = await saveWizardState(c.env, state);
         const keyboard = new InlineKeyboard().text('✅ Yes', `wiz_pr:${wizId}:yes`).text('❌ No', `wiz_pr:${wizId}:no`).row();
-        await ctx.editMessageText(`🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n\n🚀 Step 4: Auto PR?`, { parse_mode: 'Markdown', reply_markup: keyboard });
+        await ctx.editMessageText(`🛠 Mode: \`${getModeLabel(state)}\`\n\n🚀 Step 4: Auto PR?`, { parse_mode: 'Markdown', reply_markup: keyboard });
     } else if (action === 'wiz_pr') {
         const state = await getWizardState(c.env, id);
         if (!state) return ctx.reply('Wizard expired.');
         state.automationMode = (subId === 'yes' ? 'AUTO_CREATE_PR' : 'AUTOMATION_MODE_UNSPECIFIED');
         const wizId = await saveWizardState(c.env, state);
-        await ctx.reply(`🚀 **READY TO START**\n\n📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? 'Yes' : 'No'}\`\n\n**WizID:** \`${wizId}\`\nReply with your task prompt:`, {
+        await ctx.reply(`🚀 **READY TO START**\n\n📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${getModeLabel(state)}\`\n📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? 'Yes' : 'No'}\`\n\n**WizID:** \`${wizId}\`\nReply with your task prompt:`, {
             parse_mode: 'Markdown',
             reply_markup: { force_reply: true }
         });
