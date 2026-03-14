@@ -46,6 +46,17 @@ function getFriendlyType(type: string): string {
     return map[type] || type || 'ACTIVITY';
 }
 
+function addTimestamp(text: string): string {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false });
+    return `${text}\n\n🕒 _Last updated: ${timeStr}_`;
+}
+
+function isMessageNotModifiedError(e: any): boolean {
+    const msg = e.description || e.message || '';
+    return msg.includes('message is not modified');
+}
+
 function getSummary(activity: any, verbose = true): string {
     let raw = '';
     if (activity.agentMessaged?.agentMessage) raw = activity.agentMessaged.agentMessage;
@@ -108,7 +119,7 @@ async function registerSession(env: Env, jules: JulesClient, sessionId: string, 
         let finalTitle = title;
         if (!finalTitle) {
             try {
-                const session = await jules.getSession(sessionId);
+                const session: any = await jules.getSession(sessionId);
                 finalTitle = session.title || session.displayName || sessionId;
             } catch (e) {
                 finalTitle = sessionId;
@@ -145,7 +156,7 @@ export async function handleScheduled(env: Env) {
       }
 
       try {
-        const session = await jules.getSession(entry.id);
+        const session: any = await jules.getSession(entry.id);
         const sigStates = ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'COMPLETED', 'FAILED'];
 
         if (sigStates.includes(session.state)) {
@@ -190,6 +201,7 @@ app.post('/webhook', async (c) => {
 
   // Global Error Handler
   bot.catch((err) => {
+    if (isMessageNotModifiedError(err.error)) return;
     const ctx = err.ctx;
     console.error(`Bot Error:`, err.error);
     const adminId = adminIds[0];
@@ -236,7 +248,7 @@ app.post('/webhook', async (c) => {
 
   bot.command('sessions', async (ctx) => {
     try {
-      const { sessions } = await jules.listSessions();
+      const { sessions }: any = await jules.listSessions();
       if (!sessions || sessions.length === 0) return ctx.reply('No active sessions.');
       const keyboard = new InlineKeyboard();
       sessions.slice(0, 10).forEach((s: any) => {
@@ -249,7 +261,7 @@ app.post('/webhook', async (c) => {
 
   const showRepoList = async (ctx: any, pageToken?: string) => {
     try {
-      const { sources, nextPageToken } = await jules.listSources({ pageSize: 8, pageToken });
+      const { sources, nextPageToken }: any = await jules.listSources({ pageSize: 8, pageToken });
       if (!sources || sources.length === 0) return ctx.reply('No repositories found.');
       const keyboard = new InlineKeyboard();
       for (const src of sources) {
@@ -262,10 +274,13 @@ app.post('/webhook', async (c) => {
           keyboard.row().text('Next ➡️', nextCb);
       }
 
-      const text = '🚀 Step 1: Select a repository:';
+      const text = addTimestamp('🚀 Step 1: Select a repository:');
       if (ctx.callbackQuery) await ctx.editMessageText(text, { reply_markup: keyboard });
       else await ctx.reply(text, { reply_markup: keyboard });
-    } catch (e: any) { await ctx.reply(`❌ Error: ${e.message}`); }
+    } catch (e: any) {
+        if (isMessageNotModifiedError(e)) return;
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
   };
 
   bot.command('new', (ctx) => showRepoList(ctx));
@@ -300,7 +315,7 @@ app.post('/webhook', async (c) => {
     const prompt = promptParts.join(' ');
     if (!prompt) return ctx.reply('Please provide a prompt.');
     try {
-      const session = await jules.createSession(sourceName, prompt, options);
+      const session: any = await jules.createSession(sourceName, prompt, options);
       const sessionId = session.name.split('/').pop();
       await registerSession(c.env, jules, sessionId, options.title || prompt.substring(0, 30));
       await ctx.reply(`🚀 Started! ID: \`${sessionId}\``);
@@ -321,7 +336,7 @@ app.post('/webhook', async (c) => {
         const state = await getWizardState(c.env, wizId);
         if (state) {
             try {
-                const session = await jules.createSession(state.source, text, state);
+                const session: any = await jules.createSession(state.source, text, state);
                 const sid = session.name.split('/').pop();
                 await registerSession(c.env, jules, sid, state.title || text.substring(0, 30));
                 return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Tracked)`);
@@ -364,31 +379,46 @@ app.post('/webhook', async (c) => {
     if (action === 'wiz_repo_page') {
         await showRepoList(ctx, args[2] || subId);
     } else if (action === 'wiz_repo') {
-        const targetRepo = args[2] || subId;
-        const sources = await jules.listSources({ pageSize: 100 });
-        const source = sources.sources?.find((s: any) => s.name === targetRepo);
-        if (!source) return ctx.reply('Source not found.');
-        const branches = source.githubRepo?.branches?.map((b: any) => b.displayName) || ['main'];
-        const wizId = await saveWizardState(c.env, { source: targetRepo, startingBranch: 'main', branches });
-        const keyboard = new InlineKeyboard();
-        branches.slice(0, 10).forEach((br: string, idx: number) => {
-            keyboard.text(br, `wiz_br:${wizId}:${idx}`).row();
-        });
-        await ctx.editMessageText(`📂 Repo: \`${targetRepo}\`\n\n🚀 Step 2: Select branch:`, { parse_mode: 'Markdown', reply_markup: keyboard });
+        try {
+            const targetRepo = args[2] || subId;
+            const sources: any = await jules.listSources({ pageSize: 100 });
+            const source = sources.sources?.find((s: any) => s.name === targetRepo);
+            if (!source) return ctx.reply('Source not found.');
+            const branches = source.githubRepo?.branches?.map((b: any) => b.displayName) || ['main'];
+            const wizId = await saveWizardState(c.env, { source: targetRepo, startingBranch: 'main', branches });
+            const keyboard = new InlineKeyboard();
+            branches.slice(0, 10).forEach((br: string, idx: number) => {
+                keyboard.text(br, `wiz_br:${wizId}:${idx}`).row();
+            });
+            await ctx.editMessageText(addTimestamp(`📂 Repo: \`${targetRepo}\`\n\n🚀 Step 2: Select branch:`), { parse_mode: 'Markdown', reply_markup: keyboard });
+        } catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     } else if (action === 'wiz_br') {
-        const state = await getWizardState(c.env, id);
-        if (!state || !state.branches) return ctx.reply('Wizard expired. Start over with /new.');
-        state.startingBranch = state.branches[parseInt(subId)];
-        const wizId = await saveWizardState(c.env, state);
-        const keyboard = new InlineKeyboard().text('📋 Interactive', `wiz_mode:${wizId}:int`).row().text('⚡ Auto', `wiz_mode:${wizId}:auto`).row();
-        await ctx.editMessageText(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n\n🚀 Step 3: Select mode:`, { parse_mode: 'Markdown', reply_markup: keyboard });
+        try {
+            const state = await getWizardState(c.env, id);
+            if (!state || !state.branches) return ctx.reply('Wizard expired. Start over with /new.');
+            state.startingBranch = state.branches[parseInt(subId)];
+            const wizId = await saveWizardState(c.env, state);
+            const keyboard = new InlineKeyboard().text('📋 Interactive', `wiz_mode:${wizId}:int`).row().text('⚡ Auto', `wiz_mode:${wizId}:auto`).row();
+            await ctx.editMessageText(addTimestamp(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n\n🚀 Step 3: Select mode:`), { parse_mode: 'Markdown', reply_markup: keyboard });
+        } catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     } else if (action === 'wiz_mode') {
-        const state = await getWizardState(c.env, id);
-        if (!state) return ctx.reply('Wizard expired.');
-        state.requirePlanApproval = (subId === 'int');
-        const wizId = await saveWizardState(c.env, state);
-        const keyboard = new InlineKeyboard().text('✅ Yes', `wiz_pr:${wizId}:yes`).text('❌ No', `wiz_pr:${wizId}:no`).row();
-        await ctx.editMessageText(`🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n\n🚀 Step 4: Auto PR?`, { parse_mode: 'Markdown', reply_markup: keyboard });
+        try {
+            const state = await getWizardState(c.env, id);
+            if (!state) return ctx.reply('Wizard expired.');
+            state.requirePlanApproval = (subId === 'int');
+            const wizId = await saveWizardState(c.env, state);
+            const keyboard = new InlineKeyboard().text('✅ Yes', `wiz_pr:${wizId}:yes`).text('❌ No', `wiz_pr:${wizId}:no`).row();
+            await ctx.editMessageText(addTimestamp(`🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n\n🚀 Step 4: Auto PR?`), { parse_mode: 'Markdown', reply_markup: keyboard });
+        } catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     } else if (action === 'wiz_pr') {
         const state = await getWizardState(c.env, id);
         if (!state) return ctx.reply('Wizard expired.');
@@ -400,7 +430,7 @@ app.post('/webhook', async (c) => {
         });
     } else if (action === 'view') {
         try {
-            const session = await jules.getSession(id);
+            const session: any = await jules.getSession(id);
             const title = session.title || session.displayName || id;
             const keyboard = new InlineKeyboard();
             if (session.state === 'AWAITING_PLAN_APPROVAL') {
@@ -408,11 +438,15 @@ app.post('/webhook', async (c) => {
             }
             keyboard.text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row()
                     .text('📋 View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
-            await ctx.editMessageText(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, { parse_mode: 'Markdown', reply_markup: keyboard });
-        } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
+            const text = addTimestamp(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`);
+            await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+        } catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     } else if (action === 'activities') {
         try {
-          const { activities } = await jules.getAllActivities(id);
+          const { activities }: any = await jules.getAllActivities(id);
           const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
           const keyboard = new InlineKeyboard();
           let listText = `**Recent Activities**\nID: \`${id}\`\n\n`;
@@ -426,53 +460,71 @@ app.post('/webhook', async (c) => {
               keyboard.text(`🔍 Details: ${a.type}`, cb).row();
           }
           keyboard.text('🔙 Back', `view:${id}`);
-          await ctx.editMessageText(listText.substring(0, 4000), { parse_mode: 'Markdown', reply_markup: keyboard });
-        } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
+          await ctx.editMessageText(addTimestamp(listText.substring(0, 4000)), { parse_mode: 'Markdown', reply_markup: keyboard });
+        } catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     } else if (action === 'act_idx') {
         try {
-            const { activities } = await jules.getAllActivities(id);
+            const { activities }: any = await jules.getAllActivities(id);
             const filtered = activities.filter((a: any) => a.type !== 'PROGRESS_UPDATED');
             const activity = filtered[parseInt(subId)];
             if (!activity) return ctx.reply('Expired.');
             const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(activity.type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
             const keyboard = new InlineKeyboard().text('🔙 Back', `activities:${id}`);
-            if (fullContent.length <= 4000) await ctx.editMessageText(fullContent, { parse_mode: 'Markdown', reply_markup: keyboard });
+            if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent), { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' }); await ctx.reply('^ Full details above.', { reply_markup: keyboard }); }
-        } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
+        } catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     } else if (action === 'plan_view') {
         try {
-            const session = await jules.getSession(id);
-            const { activities } = await jules.getAllActivities(id);
+            const session: any = await jules.getSession(id);
+            const { activities }: any = await jules.getAllActivities(id);
             const planText = formatPlan(activities);
             const keyboard = new InlineKeyboard();
             if (session.state === 'AWAITING_PLAN_APPROVAL') keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
             keyboard.text('⬅️ Back', `view:${id}`);
             const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${escapeMarkdown(planText)}`;
-            if (content.length <= 4000) await ctx.editMessageText(content, { parse_mode: 'Markdown', reply_markup: keyboard });
+            if (content.length <= 4000) await ctx.editMessageText(addTimestamp(content), { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, content, { parse_mode: 'Markdown' }); await ctx.reply('^ Plan details above.', { reply_markup: keyboard }); }
-        } catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
+        } catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     } else if (action === 'approve_do') {
         try {
             await jules.approvePlan(id);
             await registerSession(c.env, jules, id);
             // Refresh the view to show updated status
-            const session = await jules.getSession(id);
+            const session: any = await jules.getSession(id);
             const title = session.title || session.displayName || id;
             const keyboard = new InlineKeyboard().text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row()
                     .text('📋 View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
-            await ctx.editMessageText(`✅ Approved! Current status: \`${session.state}\`\n\n**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\``, { parse_mode: 'Markdown', reply_markup: keyboard });
+            const text = addTimestamp(`✅ Approved! Current status: \`${session.state}\`\n\n**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\``);
+            await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
         }
-        catch (e: any) { await ctx.reply(`Error: ${e.message}`); }
+        catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     } else if (action === 'sessions_back') {
         // Reuse sessions command logic
-        const { sessions } = await jules.listSessions();
-        if (!sessions || sessions.length === 0) return ctx.editMessageText('No active sessions.');
-        const keyboard = new InlineKeyboard();
-        sessions.slice(0, 10).forEach((s: any) => {
-            const id = s.name.split('/').pop();
-            keyboard.text(`📝 ${s.title || s.displayName || id}`, `view:${id}`).row();
-        });
-        await ctx.editMessageText('Recent Sessions:', { reply_markup: keyboard });
+        try {
+            const { sessions }: any = await jules.listSessions();
+            if (!sessions || sessions.length === 0) return ctx.editMessageText(addTimestamp('No active sessions.'));
+            const keyboard = new InlineKeyboard();
+            sessions.slice(0, 10).forEach((s: any) => {
+                const id = s.name.split('/').pop();
+                keyboard.text(`📝 ${s.title || s.displayName || id}`, `view:${id}`).row();
+            });
+            await ctx.editMessageText(addTimestamp('Recent Sessions:'), { reply_markup: keyboard });
+        } catch (e: any) {
+            if (isMessageNotModifiedError(e)) return;
+            await ctx.reply(`Error: ${e.message}`);
+        }
     }
   });
 

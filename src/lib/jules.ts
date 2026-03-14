@@ -100,7 +100,7 @@ export class JulesClient {
       let all: any[] = [];
       let token: string | undefined = undefined;
       for (let i = 0; i < 3; i++) {
-          const res = await this.getActivities(sessionId, token);
+          const res: any = await this.getActivities(sessionId, token);
           if (res.activities) {
               all = all.concat(res.activities);
           }
