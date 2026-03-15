@@ -9,6 +9,7 @@ const app = new Hono<{ Bindings: Env }>();
 interface WizardState extends CreateSessionOptions {
     source: string;
     branches?: string[]; // Cache branches to avoid repeated API calls
+    userId?: number;
 }
 
 interface TrackedSession {
@@ -118,10 +119,19 @@ async function getCallbackData(env: Env, prefix: string, sid: string, sub: strin
     return `cb_map:${shortId}`;
 }
 
-async function saveWizardState(env: Env, state: WizardState): Promise<string> {
+async function saveWizardState(env: Env, state: WizardState, userId?: number): Promise<string> {
     const wizId = Math.random().toString(36).substring(2, 10);
     if (env.JULES_NOTIFICATIONS_KV) {
         await env.JULES_NOTIFICATIONS_KV.put(`wiz:${wizId}`, JSON.stringify(state), { expirationTtl: 1800 });
+        if (userId) {
+            const key = `user_wiz:${userId}`;
+            const raw = await env.JULES_NOTIFICATIONS_KV.get(key);
+            let wizIds: string[] = raw ? JSON.parse(raw) : [];
+            if (!wizIds.includes(wizId)) {
+                wizIds.push(wizId);
+                await env.JULES_NOTIFICATIONS_KV.put(key, JSON.stringify(wizIds), { expirationTtl: 1800 });
+            }
+        }
     }
     return wizId;
 }
@@ -243,7 +253,7 @@ app.post('/webhook', async (c) => {
   });
 
   // 1. Commands
-  bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage tasks\n/new - Create task\n/tz - Set timezone\n/check - Diagnostics'));
+  bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage tasks\n/new - Create task\n/cancel - Cancel wizard\n/tz - Set timezone\n/check - Diagnostics'));
 
   bot.command('tz', async (ctx) => {
       const arg = ctx.match?.trim();
@@ -344,6 +354,20 @@ app.post('/webhook', async (c) => {
 
   bot.command('new', (ctx) => showRepoList(ctx));
 
+  bot.command('cancel', async (ctx) => {
+      if (!c.env.JULES_NOTIFICATIONS_KV) return ctx.reply('❌ KV not configured.');
+      const key = `user_wiz:${ctx.from!.id}`;
+      const raw = await c.env.JULES_NOTIFICATIONS_KV.get(key);
+      if (raw) {
+          const wizIds: string[] = JSON.parse(raw);
+          for (const wid of wizIds) {
+              await c.env.JULES_NOTIFICATIONS_KV.delete(`wiz:${wid}`);
+          }
+          await c.env.JULES_NOTIFICATIONS_KV.delete(key);
+      }
+      await ctx.reply('✅ 所有进行中的 /new 引导任务已取消。');
+  });
+
   bot.command('reply', async (ctx) => {
     const match = ctx.message?.text?.match(/\/reply\s+([^\s]+)\s+(.+)/);
     if (!match) return ctx.reply('Usage: /reply [session_id] [message]');
@@ -404,6 +428,25 @@ app.post('/webhook', async (c) => {
                 const session = await jules.createSession(state.source, text, state);
                 const sid = session.name.split('/').pop() || 'unknown';
                 await registerSession(c.env, jules, sid, state.title || text.substring(0, 30));
+
+                // Cleanup wizard state
+                if (c.env.JULES_NOTIFICATIONS_KV) {
+                    await c.env.JULES_NOTIFICATIONS_KV.delete(`wiz:${wizId}`);
+                    if (state.userId) {
+                        const key = `user_wiz:${state.userId}`;
+                        const raw = await c.env.JULES_NOTIFICATIONS_KV.get(key);
+                        if (raw) {
+                            let wizIds: string[] = JSON.parse(raw);
+                            wizIds = wizIds.filter(id => id !== wizId);
+                            if (wizIds.length > 0) {
+                                await c.env.JULES_NOTIFICATIONS_KV.put(key, JSON.stringify(wizIds), { expirationTtl: 1800 });
+                            } else {
+                                await c.env.JULES_NOTIFICATIONS_KV.delete(key);
+                            }
+                        }
+                    }
+                }
+
                 return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Tracked)`);
             } catch (e: unknown) {
                 const errorMessage = e instanceof Error ? e.message : String(e);
@@ -476,7 +519,7 @@ app.post('/webhook', async (c) => {
             const source = sources?.find((s) => s.name === targetRepo);
             if (!source) return ctx.reply('Source not found.');
             const branches = source.githubRepo?.branches?.map((b) => b.displayName) || ['main'];
-            const wizId = await saveWizardState(c.env, { source: targetRepo, startingBranch: 'main', branches });
+            const wizId = await saveWizardState(c.env, { source: targetRepo, startingBranch: 'main', branches, userId: ctx.from!.id }, ctx.from!.id);
             const keyboard = new InlineKeyboard();
             branches.slice(0, 10).forEach((br: string, idx: number) => {
                 keyboard.text(br, `wiz_br:${wizId}:${idx}`).row();
@@ -493,7 +536,7 @@ app.post('/webhook', async (c) => {
             const state = await getWizardState(c.env, id);
             if (!state || !state.branches) return ctx.reply('Wizard expired. Start over with /new.');
             state.startingBranch = state.branches[parseInt(subId)];
-            const wizId = await saveWizardState(c.env, state);
+            const wizId = await saveWizardState(c.env, state, ctx.from!.id);
             const keyboard = new InlineKeyboard().text('📋 Interactive', `wiz_mode:${wizId}:int`).row().text('⚡ Auto', `wiz_mode:${wizId}:auto`).row();
             const tz = await getUserTimezone(c.env, ctx.from?.id);
             await ctx.editMessageText(addTimestamp(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n\n🚀 Step 3: Select mode:`, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
@@ -507,7 +550,7 @@ app.post('/webhook', async (c) => {
             const state = await getWizardState(c.env, id);
             if (!state) return ctx.reply('Wizard expired.');
             state.requirePlanApproval = (subId === 'int');
-            const wizId = await saveWizardState(c.env, state);
+            const wizId = await saveWizardState(c.env, state, ctx.from!.id);
             const keyboard = new InlineKeyboard().text('✅ Yes', `wiz_pr:${wizId}:yes`).text('❌ No', `wiz_pr:${wizId}:no`).row();
             const tz = await getUserTimezone(c.env, ctx.from?.id);
             await ctx.editMessageText(addTimestamp(`🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n\n🚀 Step 4: Auto PR?`, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
@@ -520,7 +563,7 @@ app.post('/webhook', async (c) => {
         const state = await getWizardState(c.env, id);
         if (!state) return ctx.reply('Wizard expired.');
         state.automationMode = (subId === 'yes' ? 'AUTO_CREATE_PR' : 'AUTOMATION_MODE_UNSPECIFIED');
-        const wizId = await saveWizardState(c.env, state);
+        const wizId = await saveWizardState(c.env, state, ctx.from!.id);
         await ctx.reply(`🚀 **READY TO START**\n\n📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? 'Yes' : 'No'}\`\n\n**WizID:** \`${wizId}\`\nReply with your task prompt:`, {
             parse_mode: 'Markdown',
             reply_markup: { force_reply: true }
@@ -640,6 +683,7 @@ app.post('/webhook', async (c) => {
   bot.api.setMyCommands([
     { command: "sessions", description: "Manage tasks" },
     { command: "new", description: "Create task" },
+    { command: "cancel", description: "Cancel current wizard flow" },
     { command: "tz", description: "Set timezone" },
     { command: "check", description: "Diagnostics" },
     { command: "help", description: "Help" }
