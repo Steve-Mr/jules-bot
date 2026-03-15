@@ -246,6 +246,22 @@ app.post('/webhook', async (c) => {
   bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage tasks\n/new - Create task\n/tz - Set timezone\n/check - Diagnostics'));
 
   bot.command('tz', async (ctx) => {
+      const arg = ctx.match?.trim();
+      if (arg) {
+          try {
+              // Validate timezone
+              new Intl.DateTimeFormat('en-GB', { timeZone: arg });
+              if (c.env.JULES_NOTIFICATIONS_KV) {
+                  await c.env.JULES_NOTIFICATIONS_KV.put(`tz:${ctx.from!.id}`, arg);
+                  return await ctx.reply(`✅ Timezone updated to \`${arg}\``, { parse_mode: 'Markdown' });
+              } else {
+                  return await ctx.reply('❌ KV not configured.');
+              }
+          } catch {
+              return await ctx.reply(`❌ Invalid timezone: \`${arg}\`\n\nExamples:\n- \`Asia/Shanghai\`\n- \`Europe/London\`\n- \`UTC\``, { parse_mode: 'Markdown' });
+          }
+      }
+
       const keyboard = new InlineKeyboard()
           .text('Shanghai (UTC+8)', 'set_tz:Asia/Shanghai').row()
           .text('Tokyo (UTC+9)', 'set_tz:Asia/Tokyo').row()
@@ -254,7 +270,7 @@ app.post('/webhook', async (c) => {
           .text('UTC', 'set_tz:UTC').row();
 
       const tz = await getUserTimezone(c.env, ctx.from?.id);
-      await ctx.reply(`🕒 **Timezone Settings**\n\nCurrent: \`${tz}\`\n\nSelect a timezone:`, {
+      await ctx.reply(`🕒 **Timezone Settings**\n\nCurrent: \`${tz}\`\n\nSelect a timezone or use: \`/tz Asia/Shanghai\``, {
           parse_mode: 'Markdown',
           reply_markup: keyboard
       });
