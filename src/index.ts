@@ -46,10 +46,26 @@ function getFriendlyType(type: string): string {
     return map[type] || type || 'ACTIVITY';
 }
 
-function addTimestamp(text: string): string {
+function addTimestamp(text: string, timezone: string = 'UTC'): string {
     const now = new Date();
-    const timeStr = now.toTimeString().slice(0, 8);
-    return `${text}\n\n🕒 _Last updated: ${timeStr}_`;
+    try {
+        const timeStr = new Intl.DateTimeFormat('en-GB', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+            timeZone: timezone
+        }).format(now);
+        return `${text}\n\n🕒 _Last updated: ${timeStr} (${timezone})_`;
+    } catch {
+        const timeStr = now.toTimeString().slice(0, 8);
+        return `${text}\n\n🕒 _Last updated: ${timeStr} (UTC-Fallback)_`;
+    }
+}
+
+async function getUserTimezone(env: Env, userId?: number): Promise<string> {
+    if (!userId || !env.JULES_NOTIFICATIONS_KV) return 'UTC';
+    return await env.JULES_NOTIFICATIONS_KV.get(`tz:${userId}`) || 'UTC';
 }
 
 function isMessageNotModifiedError(e: unknown): boolean {
@@ -227,7 +243,22 @@ app.post('/webhook', async (c) => {
   });
 
   // 1. Commands
-  bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage\n/new - Create\n/check - Diagnostics'));
+  bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage tasks\n/new - Create task\n/tz - Set timezone\n/check - Diagnostics'));
+
+  bot.command('tz', async (ctx) => {
+      const keyboard = new InlineKeyboard()
+          .text('Shanghai (UTC+8)', 'set_tz:Asia/Shanghai').row()
+          .text('Tokyo (UTC+9)', 'set_tz:Asia/Tokyo').row()
+          .text('London (UTC+0/1)', 'set_tz:Europe/London').row()
+          .text('New York (UTC-5/4)', 'set_tz:America/New_York').row()
+          .text('UTC', 'set_tz:UTC').row();
+
+      const tz = await getUserTimezone(c.env, ctx.from?.id);
+      await ctx.reply(`🕒 **Timezone Settings**\n\nCurrent: \`${tz}\`\n\nSelect a timezone:`, {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+      });
+  });
 
   bot.command('check', async (ctx) => {
       let report = "🛠 **System Check**\n\n";
@@ -284,7 +315,8 @@ app.post('/webhook', async (c) => {
           keyboard.row().text('Next ➡️', nextCb);
       }
 
-      const text = addTimestamp('🚀 Step 1: Select a repository:');
+      const tz = await getUserTimezone(c.env, ctx.from?.id);
+      const text = addTimestamp('🚀 Step 1: Select a repository:', tz);
       if (ctx.callbackQuery) await ctx.editMessageText(text, { reply_markup: keyboard });
       else await ctx.reply(text, { reply_markup: keyboard });
     } catch (e: unknown) {
@@ -399,7 +431,15 @@ app.post('/webhook', async (c) => {
     const id = args[0];
     const subId = args[1];
 
-    if (action === 'wiz_repo_page') {
+    if (action === 'set_tz') {
+        const newTz = id; // The first argument is the timezone string
+        if (c.env.JULES_NOTIFICATIONS_KV) {
+            await c.env.JULES_NOTIFICATIONS_KV.put(`tz:${ctx.from!.id}`, newTz);
+            await ctx.editMessageText(`✅ Timezone updated to \`${newTz}\``, { parse_mode: 'Markdown' });
+        } else {
+            await ctx.reply('❌ KV not configured.');
+        }
+    } else if (action === 'wiz_repo_page') {
         await showRepoList(ctx, args[2] || subId);
     } else if (action === 'wiz_repo') {
         try {
@@ -413,7 +453,8 @@ app.post('/webhook', async (c) => {
             branches.slice(0, 10).forEach((br: string, idx: number) => {
                 keyboard.text(br, `wiz_br:${wizId}:${idx}`).row();
             });
-            await ctx.editMessageText(addTimestamp(`📂 Repo: \`${targetRepo}\`\n\n🚀 Step 2: Select branch:`), { parse_mode: 'Markdown', reply_markup: keyboard });
+            const tz = await getUserTimezone(c.env, ctx.from?.id);
+            await ctx.editMessageText(addTimestamp(`📂 Repo: \`${targetRepo}\`\n\n🚀 Step 2: Select branch:`, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
             const errorMessage = e instanceof Error ? e.message : String(e);
@@ -426,7 +467,8 @@ app.post('/webhook', async (c) => {
             state.startingBranch = state.branches[parseInt(subId)];
             const wizId = await saveWizardState(c.env, state);
             const keyboard = new InlineKeyboard().text('📋 Interactive', `wiz_mode:${wizId}:int`).row().text('⚡ Auto', `wiz_mode:${wizId}:auto`).row();
-            await ctx.editMessageText(addTimestamp(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n\n🚀 Step 3: Select mode:`), { parse_mode: 'Markdown', reply_markup: keyboard });
+            const tz = await getUserTimezone(c.env, ctx.from?.id);
+            await ctx.editMessageText(addTimestamp(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n\n🚀 Step 3: Select mode:`, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
             const errorMessage = e instanceof Error ? e.message : String(e);
@@ -439,7 +481,8 @@ app.post('/webhook', async (c) => {
             state.requirePlanApproval = (subId === 'int');
             const wizId = await saveWizardState(c.env, state);
             const keyboard = new InlineKeyboard().text('✅ Yes', `wiz_pr:${wizId}:yes`).text('❌ No', `wiz_pr:${wizId}:no`).row();
-            await ctx.editMessageText(addTimestamp(`🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n\n🚀 Step 4: Auto PR?`), { parse_mode: 'Markdown', reply_markup: keyboard });
+            const tz = await getUserTimezone(c.env, ctx.from?.id);
+            await ctx.editMessageText(addTimestamp(`🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n\n🚀 Step 4: Auto PR?`, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
             const errorMessage = e instanceof Error ? e.message : String(e);
@@ -464,7 +507,8 @@ app.post('/webhook', async (c) => {
             }
             keyboard.text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row()
                     .text('📋 View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
-            const text = addTimestamp(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`);
+            const tz = await getUserTimezone(c.env, ctx.from?.id);
+            const text = addTimestamp(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, tz);
             await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
@@ -478,16 +522,17 @@ app.post('/webhook', async (c) => {
           const keyboard = new InlineKeyboard();
           let listText = `**Recent Activities**\nID: \`${id}\`\n\n`;
           const items = filtered.slice(-5).reverse();
+          const tz = await getUserTimezone(c.env, ctx.from?.id);
           for (let i=0; i<items.length; i++) {
               const a = items[i];
-              const time = new Date(a.createTime).toLocaleTimeString();
+              const time = new Date(a.createTime).toLocaleTimeString('en-GB', { timeZone: tz, hour12: false });
               const originalIdx = filtered.length - 1 - i;
               listText += `🕒 ${time} **${getFriendlyType(a.type || 'ACTIVITY')}**\n${escapeMarkdown(getSummary(a, false))}\n\n`;
               const cb = await getCallbackData(c.env, 'act_idx', id, originalIdx.toString());
               keyboard.text(`🔍 Details: ${a.type || 'ACTIVITY'}`, cb).row();
           }
           keyboard.text('🔙 Back', `view:${id}`);
-          await ctx.editMessageText(addTimestamp(listText.substring(0, 4000)), { parse_mode: 'Markdown', reply_markup: keyboard });
+          await ctx.editMessageText(addTimestamp(listText.substring(0, 4000), tz), { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
             const errorMessage = e instanceof Error ? e.message : String(e);
@@ -501,7 +546,8 @@ app.post('/webhook', async (c) => {
             if (!activity) return ctx.reply('Expired.');
             const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(activity.type || 'ACTIVITY')}\n\n${escapeMarkdown(getSummary(activity, true))}`;
             const keyboard = new InlineKeyboard().text('🔙 Back', `activities:${id}`);
-            if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent), { parse_mode: 'Markdown', reply_markup: keyboard });
+            const tz = await getUserTimezone(c.env, ctx.from?.id);
+            if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' }); await ctx.reply('^ Full details above.', { reply_markup: keyboard }); }
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
@@ -517,7 +563,8 @@ app.post('/webhook', async (c) => {
             if (session.state === 'AWAITING_PLAN_APPROVAL') keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
             keyboard.text('⬅️ Back', `view:${id}`);
             const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${escapeMarkdown(planText)}`;
-            if (content.length <= 4000) await ctx.editMessageText(addTimestamp(content), { parse_mode: 'Markdown', reply_markup: keyboard });
+            const tz = await getUserTimezone(c.env, ctx.from?.id);
+            if (content.length <= 4000) await ctx.editMessageText(addTimestamp(content, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, content, { parse_mode: 'Markdown' }); await ctx.reply('^ Plan details above.', { reply_markup: keyboard }); }
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
@@ -533,7 +580,8 @@ app.post('/webhook', async (c) => {
             const title = session.title || session.displayName || id;
             const keyboard = new InlineKeyboard().text('🔄 Refresh', `view:${id}`).text('📋 Activities', `activities:${id}`).row()
                     .text('📋 View Plan', `plan_view:${id}`).text('🔙 List', 'sessions_back');
-            const text = addTimestamp(`✅ Approved! Current status: \`${session.state}\`\n\n**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\``);
+            const tz = await getUserTimezone(c.env, ctx.from?.id);
+            const text = addTimestamp(`✅ Approved! Current status: \`${session.state}\`\n\n**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\``, tz);
             await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
         }
         catch (e: unknown) {
@@ -545,13 +593,14 @@ app.post('/webhook', async (c) => {
         // Reuse sessions command logic
         try {
             const { sessions } = await jules.listSessions();
-            if (!sessions || sessions.length === 0) return ctx.editMessageText(addTimestamp('No active sessions.'));
+            const tz = await getUserTimezone(c.env, ctx.from?.id);
+            if (!sessions || sessions.length === 0) return ctx.editMessageText(addTimestamp('No active sessions.', tz));
             const keyboard = new InlineKeyboard();
             sessions.slice(0, 10).forEach((s) => {
                 const id = s.name.split('/').pop() || 'unknown';
                 keyboard.text(`📝 ${s.title || s.displayName || id}`, `view:${id}`).row();
             });
-            await ctx.editMessageText(addTimestamp('Recent Sessions:'), { reply_markup: keyboard });
+            await ctx.editMessageText(addTimestamp('Recent Sessions:', tz), { reply_markup: keyboard });
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
             const errorMessage = e instanceof Error ? e.message : String(e);
