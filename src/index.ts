@@ -612,6 +612,7 @@ app.post('/webhook', async (c) => {
   bot.api.setMyCommands([
     { command: "sessions", description: "Manage tasks" },
     { command: "new", description: "Create task" },
+    { command: "tz", description: "Set timezone" },
     { command: "check", description: "Diagnostics" },
     { command: "help", description: "Help" }
   ]).catch(() => {});
