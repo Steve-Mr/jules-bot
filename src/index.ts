@@ -31,6 +31,18 @@ async function sendLongMessage(bot: Bot, chatId: string | number, text: string, 
     }
 }
 
+function getActivityType(activity: any): string {
+    if (activity.type) return activity.type;
+    if (activity.planGenerated) return 'PLAN_GENERATED';
+    if (activity.planApproved) return 'PLAN_APPROVED';
+    if (activity.userMessaged) return 'USER_MESSAGED';
+    if (activity.agentMessaged) return 'AGENT_MESSAGED';
+    if (activity.sessionCompleted) return 'SESSION_COMPLETED';
+    if (activity.sessionFailed) return 'SESSION_FAILED';
+    if (activity.progressUpdated) return 'PROGRESS_UPDATED';
+    return 'ACTIVITY';
+}
+
 function getFriendlyType(type: string): string {
     const map: Record<string, string> = {
         'PLAN_GENERATED': '📋 Plan Generated',
@@ -91,8 +103,15 @@ function getSummary(activity: any, verbose = true): string {
     else if (activity.userRequest?.prompt) raw = activity.userRequest.prompt;
     else if (activity.agentResponse?.text) raw = activity.agentResponse.text;
     else if (activity.progressUpdated?.description) raw = activity.progressUpdated.description;
+    else if (activity.sessionCompleted) raw = 'The task was completed successfully.';
     else if (activity.sessionFailed?.reason) raw = activity.sessionFailed.reason;
-    else raw = '(No details available)';
+    else if (activity.sessionFailed) raw = 'The task failed to complete.';
+
+    if (!raw && activity.artifacts && activity.artifacts.length > 0) {
+        raw = 'Code changes applied.';
+    }
+
+    if (!raw) raw = '(No details available)';
 
     if (!verbose && raw.length > 60) return raw.substring(0, 57) + '...';
     return raw;
@@ -103,9 +122,12 @@ function formatPlan(activities: any[]): string {
     if (!planActivity) return 'Check details on GitHub or Jules web app.';
     const plan = planActivity.planGenerated?.plan;
     if (plan && plan.steps) {
-        return plan.steps.map((s: any) => `${s.index + 1}. ${s.title}: ${s.description}`).join('\n');
+        return plan.steps.map((s: any, idx: number) => {
+            const displayIndex = (typeof s.index === 'number') ? s.index + 1 : idx + 1;
+            return `**${displayIndex}. ${escapeMarkdown(s.title)}**\n${escapeMarkdown(s.description)}`;
+        }).join('\n\n');
     }
-    return getSummary(planActivity);
+    return escapeMarkdown(getSummary(planActivity));
 }
 
 // Map long callback data to short KV keys if needed
@@ -546,20 +568,23 @@ app.post('/webhook', async (c) => {
     } else if (action === 'activities') {
         try {
           const { activities } = await jules.getAllActivities(id);
-          const filtered = activities.filter((a) => a.type !== 'PROGRESS_UPDATED');
+          const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
           const keyboard = new InlineKeyboard();
           let listText = `**Recent Activities**\nID: \`${id}\`\n\n`;
           const items = filtered.slice(-5).reverse();
           const tz = await getUserTimezone(c.env, ctx.from?.id);
+          const emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'];
           for (let i=0; i<items.length; i++) {
               const a = items[i];
+              const type = getActivityType(a);
               const time = new Date(a.createTime).toLocaleTimeString('en-GB', { timeZone: tz, hour12: false });
               const originalIdx = filtered.length - 1 - i;
-              listText += `🕒 ${time} **${getFriendlyType(a.type || 'ACTIVITY')}**\n${escapeMarkdown(getSummary(a, false))}\n\n`;
+              const emoji = emojis[i] || `${i + 1}`;
+              listText += `${emoji} 🕒 ${time} **${getFriendlyType(type)}**\n${escapeMarkdown(getSummary(a, false))}\n\n`;
               const cb = await getCallbackData(c.env, 'act_idx', id, originalIdx.toString());
-              keyboard.text(`🔍 Details: ${a.type || 'ACTIVITY'}`, cb).row();
+              keyboard.text(emoji, cb);
           }
-          keyboard.text('🔙 Back', `view:${id}`);
+          keyboard.row().text('🔙 Back', `view:${id}`);
           await ctx.editMessageText(addTimestamp(listText.substring(0, 4000), tz), { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (e: unknown) {
             if (isMessageNotModifiedError(e)) return;
@@ -569,10 +594,11 @@ app.post('/webhook', async (c) => {
     } else if (action === 'act_idx') {
         try {
             const { activities } = await jules.getAllActivities(id);
-            const filtered = activities.filter((a) => a.type !== 'PROGRESS_UPDATED');
+            const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
             const activity = filtered[parseInt(subId)];
             if (!activity) return ctx.reply('Expired.');
-            const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(activity.type || 'ACTIVITY')}\n\n${escapeMarkdown(getSummary(activity, true))}`;
+            const type = getActivityType(activity);
+            const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
             const keyboard = new InlineKeyboard().text('🔙 Back', `activities:${id}`);
             const tz = await getUserTimezone(c.env, ctx.from?.id);
             if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
@@ -590,7 +616,7 @@ app.post('/webhook', async (c) => {
             const keyboard = new InlineKeyboard();
             if (session.state === 'AWAITING_PLAN_APPROVAL') keyboard.text('👍 Approve Plan', `approve_do:${id}`).row();
             keyboard.text('⬅️ Back', `view:${id}`);
-            const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${escapeMarkdown(planText)}`;
+            const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${planText}`;
             const tz = await getUserTimezone(c.env, ctx.from?.id);
             if (content.length <= 4000) await ctx.editMessageText(addTimestamp(content, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
             else { await sendLongMessage(bot, ctx.chat!.id, content, { parse_mode: 'Markdown' }); await ctx.reply('^ Plan details above.', { reply_markup: keyboard }); }
