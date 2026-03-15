@@ -333,15 +333,30 @@ app.post('/webhook', async (c) => {
 
     // Pattern 2: Normal reply to a session message
     if (replyTo) {
-      // Use a negative lookbehind to ensure we don't accidentally match WizID as a session ID
-      // Robust regex to handle potential Markdown artifacts around the ID
-      const sidMatch = replyText.match(/(?<!Wiz)(?:Session|ID):\s*[`*_]*([0-9a-zA-Z_-]+)[`*_]*/i);
-      if (sidMatch) {
-        const sid = sidMatch[1];
+      // Use multiple patterns to robustly extract session ID.
+      // Use a negative lookbehind (?<!Wiz) to ensure we don't accidentally match WizID as a session ID.
+      // Prioritize ID: field, then generic "session <ID>", then fallback to Session:
+      const sidPatterns = [
+        /(?<!Wiz)(?:\*\*|__)?ID(?:\*\*|__)?\s*[:：]\s*[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i,
+        /(?<!Wiz)(?:\*\*|__)?ID(?:\*\*|__)?\s*(?:\*\*|__)?[:：](?:\*\*|__)?\s*[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i,
+        /session\s+[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i,
+        /(?<!Wiz)(?:\*\*|__)?Session(?:\*\*|__)?\s*[:：]\s*[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i
+      ];
+
+      let sessionId: string | null = null;
+      for (const p of sidPatterns) {
+        const match = replyText.match(p);
+        if (match) {
+          sessionId = match[1];
+          break;
+        }
+      }
+
+      if (sessionId) {
         try {
-          await jules.sendMessage(sid, text);
-          await registerSession(c.env, jules, sid);
-          return ctx.reply(`✅ Sent to session \`${sid}\`. (Now tracking)`, { reply_to_message_id: ctx.message.message_id });
+          await jules.sendMessage(sessionId, text);
+          await registerSession(c.env, jules, sessionId);
+          return ctx.reply(`✅ Sent to session \`${sessionId}\`. (Now tracking)`, { reply_to_message_id: ctx.message.message_id });
         } catch (e: any) { return ctx.reply(`❌ Failed to send: ${e.message}`); }
       }
     }
