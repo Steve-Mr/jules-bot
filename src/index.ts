@@ -31,6 +31,18 @@ async function sendLongMessage(bot: Bot, chatId: string | number, text: string, 
     }
 }
 
+function getActivityType(activity: any): string {
+    if (activity.type) return activity.type;
+    if (activity.planGenerated) return 'PLAN_GENERATED';
+    if (activity.planApproved) return 'PLAN_APPROVED';
+    if (activity.userMessaged) return 'USER_MESSAGED';
+    if (activity.agentMessaged) return 'AGENT_MESSAGED';
+    if (activity.sessionCompleted) return 'SESSION_COMPLETED';
+    if (activity.sessionFailed) return 'SESSION_FAILED';
+    if (activity.progressUpdated) return 'PROGRESS_UPDATED';
+    return 'ACTIVITY';
+}
+
 function getFriendlyType(type: string): string {
     const map: Record<string, string> = {
         'PLAN_GENERATED': '📋 Plan Generated',
@@ -556,7 +568,7 @@ app.post('/webhook', async (c) => {
     } else if (action === 'activities') {
         try {
           const { activities } = await jules.getAllActivities(id);
-          const filtered = activities.filter((a) => a.type !== 'PROGRESS_UPDATED');
+          const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
           const keyboard = new InlineKeyboard();
           let listText = `**Recent Activities**\nID: \`${id}\`\n\n`;
           const items = filtered.slice(-5).reverse();
@@ -564,10 +576,11 @@ app.post('/webhook', async (c) => {
           const emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'];
           for (let i=0; i<items.length; i++) {
               const a = items[i];
+              const type = getActivityType(a);
               const time = new Date(a.createTime).toLocaleTimeString('en-GB', { timeZone: tz, hour12: false });
               const originalIdx = filtered.length - 1 - i;
               const emoji = emojis[i] || `${i + 1}`;
-              listText += `${emoji} 🕒 ${time} **${getFriendlyType(a.type || 'ACTIVITY')}**\n${escapeMarkdown(getSummary(a, false))}\n\n`;
+              listText += `${emoji} 🕒 ${time} **${getFriendlyType(type)}**\n${escapeMarkdown(getSummary(a, false))}\n\n`;
               const cb = await getCallbackData(c.env, 'act_idx', id, originalIdx.toString());
               keyboard.text(emoji, cb);
           }
@@ -581,10 +594,11 @@ app.post('/webhook', async (c) => {
     } else if (action === 'act_idx') {
         try {
             const { activities } = await jules.getAllActivities(id);
-            const filtered = activities.filter((a) => a.type !== 'PROGRESS_UPDATED');
+            const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
             const activity = filtered[parseInt(subId)];
             if (!activity) return ctx.reply('Expired.');
-            const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(activity.type || 'ACTIVITY')}\n\n${escapeMarkdown(getSummary(activity, true))}`;
+            const type = getActivityType(activity);
+            const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
             const keyboard = new InlineKeyboard().text('🔙 Back', `activities:${id}`);
             const tz = await getUserTimezone(c.env, ctx.from?.id);
             if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
