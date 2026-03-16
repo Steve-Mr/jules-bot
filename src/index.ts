@@ -199,6 +199,19 @@ async function getWizardState(env: Env, wizId: string): Promise<WizardState | nu
     return raw ? JSON.parse(raw) : null;
 }
 
+async function showActivityDetail(ctx: BotContext, bot: Bot, env: Env, sessionId: string, activity: any, title: string, backAction: string) {
+    const type = getActivityType(activity);
+    const fullContent = `**${title}**\n**ID:** \`${sessionId}\`\n**Type:** ${getFriendlyType(type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
+    const keyboard = new InlineKeyboard().text('🔙 Back', backAction);
+    const tz = await getUserTimezone(env, ctx.from?.id);
+    if (fullContent.length <= 4000) {
+        await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
+    } else {
+        await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
+        await ctx.reply('^ Full details above.', { reply_markup: keyboard });
+    }
+}
+
 async function registerSession(env: Env, jules: JulesClient, sessionId: string, title?: string) {
     if (!env.JULES_NOTIFICATIONS_KV) return;
     const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
@@ -704,9 +717,12 @@ app.post('/webhook', async (c) => {
                     keyboard.text('💬 View Message', `${CallbackAction.ViewLatestActivity}:${id}`).row();
                 }
                 keyboard.text('🔄 Refresh', `${CallbackAction.ViewSession}:${id}`)
-                        .text('📋 Activities', `${CallbackAction.Activities}:${id}`).row()
-                        .text('📋 View Plan', `${CallbackAction.PlanView}:${id}`)
-                        .text('🔙 List', CallbackAction.SessionsBack);
+                        .text('📋 Activities', `${CallbackAction.Activities}:${id}`).row();
+
+                if (session.state !== 'AWAITING_PLAN_APPROVAL') {
+                    keyboard.text('📋 View Plan', `${CallbackAction.PlanView}:${id}`);
+                }
+                keyboard.text('🔙 List', CallbackAction.SessionsBack);
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
                 const text = addTimestamp(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, tz);
                 await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
@@ -739,15 +755,7 @@ app.post('/webhook', async (c) => {
                 const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
                 const activity = filtered[parseInt(subId)];
                 if (!activity) return ctx.reply('Expired.');
-                const type = getActivityType(activity);
-                const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
-                const keyboard = new InlineKeyboard().text('🔙 Back', `${CallbackAction.Activities}:${id}`);
-                const tz = await getUserTimezone(c.env, ctx.from?.id);
-                if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
-                else {
-                    await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
-                    await ctx.reply('^ Full details above.', { reply_markup: keyboard });
-                }
+                await showActivityDetail(ctx, bot, c.env, id, activity, 'Activity Detail', `${CallbackAction.Activities}:${id}`);
                 break;
             }
             case CallbackAction.PlanView: {
@@ -773,15 +781,7 @@ app.post('/webhook', async (c) => {
                 const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
                 const activity = filtered[filtered.length - 1]; // Most recent
                 if (!activity) return ctx.reply('No recent activity found.');
-                const type = getActivityType(activity);
-                const fullContent = `**Latest Activity**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
-                const keyboard = new InlineKeyboard().text('🔙 Back', `${CallbackAction.ViewSession}:${id}`);
-                const tz = await getUserTimezone(c.env, ctx.from?.id);
-                if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
-                else {
-                    await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
-                    await ctx.reply('^ Latest details above.', { reply_markup: keyboard });
-                }
+                await showActivityDetail(ctx, bot, c.env, id, activity, 'Latest Activity', `${CallbackAction.ViewSession}:${id}`);
                 break;
             }
             case CallbackAction.ApprovePlan:
