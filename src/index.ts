@@ -21,6 +21,7 @@ const CallbackAction = {
     PlanView: 'plan_view',
     ApprovePlan: 'approve_do',
     SessionsBack: 'sessions_back',
+    ViewLatestActivity: 'view_latest',
 } as const;
 
 // --- Wizard & Registry Types ---
@@ -198,6 +199,19 @@ async function getWizardState(env: Env, wizId: string): Promise<WizardState | nu
     return raw ? JSON.parse(raw) : null;
 }
 
+async function showActivityDetail(ctx: BotContext, bot: Bot, env: Env, sessionId: string, activity: any, title: string, backAction: string) {
+    const type = getActivityType(activity);
+    const fullContent = `**${title}**\n**ID:** \`${sessionId}\`\n**Type:** ${getFriendlyType(type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
+    const keyboard = new InlineKeyboard().text('🔙 Back', backAction);
+    const tz = await getUserTimezone(env, ctx.from?.id);
+    if (fullContent.length <= 4000) {
+        await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
+    } else {
+        await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
+        await ctx.reply('^ Full details above.', { reply_markup: keyboard });
+    }
+}
+
 async function registerSession(env: Env, jules: JulesClient, sessionId: string, title?: string) {
     if (!env.JULES_NOTIFICATIONS_KV) return;
     const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
@@ -264,12 +278,16 @@ export async function processTrackedSessions(env: Env, manual: boolean = false):
             const keyboard = new InlineKeyboard();
             if (session.state === 'AWAITING_PLAN_APPROVAL') {
               keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${entry.id}`).row();
+              keyboard.text('📋 View Plan', `${CallbackAction.PlanView}:${entry.id}`).row();
+            } else if (session.state === 'AWAITING_USER_FEEDBACK') {
+              // 注意：请确保 CallbackAction 中定义了 ViewLatestActivity
+              keyboard.text('💬 View Message', `${CallbackAction.ViewLatestActivity}:${entry.id}`).row();
             }
+
             keyboard.text('📋 View Details', `${CallbackAction.ViewSession}:${entry.id}`).row();
 
             const prefix = manual ? '🔍 **Manual Status Check**' : '🔔 **Jules Task Update**';
             const message = `${prefix}\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`;
-
             // Notify all administrators. Use allSettled to prevent one failing admin from blocking others.
             await Promise.allSettled(adminIds.map(adminId =>
               bot.api.sendMessage(adminId, message, { parse_mode: 'Markdown', reply_markup: keyboard })
@@ -727,11 +745,17 @@ app.post('/webhook', async (c) => {
                 const keyboard = new InlineKeyboard();
                 if (session.state === 'AWAITING_PLAN_APPROVAL') {
                     keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${id}`).row();
+                    keyboard.text('📋 View Plan', `${CallbackAction.PlanView}:${id}`).row();
+                } else if (session.state === 'AWAITING_USER_FEEDBACK') {
+                    keyboard.text('💬 View Message', `${CallbackAction.ViewLatestActivity}:${id}`).row();
                 }
                 keyboard.text('🔄 Refresh', `${CallbackAction.ViewSession}:${id}`)
-                        .text('📋 Activities', `${CallbackAction.Activities}:${id}`).row()
-                        .text('📋 View Plan', `${CallbackAction.PlanView}:${id}`)
-                        .text('🔙 List', CallbackAction.SessionsBack);
+                        .text('📋 Activities', `${CallbackAction.Activities}:${id}`).row();
+
+                if (session.state !== 'AWAITING_PLAN_APPROVAL') {
+                    keyboard.text('📋 View Plan', `${CallbackAction.PlanView}:${id}`);
+                }
+                keyboard.text('🔙 List', CallbackAction.SessionsBack);
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
                 const text = addTimestamp(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, tz);
                 await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
@@ -764,15 +788,7 @@ app.post('/webhook', async (c) => {
                 const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
                 const activity = filtered[parseInt(subId)];
                 if (!activity) return ctx.reply('Expired.');
-                const type = getActivityType(activity);
-                const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
-                const keyboard = new InlineKeyboard().text('🔙 Back', `${CallbackAction.Activities}:${id}`);
-                const tz = await getUserTimezone(c.env, ctx.from?.id);
-                if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
-                else {
-                    await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
-                    await ctx.reply('^ Full details above.', { reply_markup: keyboard });
-                }
+                await showActivityDetail(ctx, bot, c.env, id, activity, 'Activity Detail', `${CallbackAction.Activities}:${id}`);
                 break;
             }
             case CallbackAction.PlanView: {
@@ -791,6 +807,14 @@ app.post('/webhook', async (c) => {
                     await sendLongMessage(bot, ctx.chat!.id, content, { parse_mode: 'Markdown' });
                     await ctx.reply('^ Plan details above.', { reply_markup: keyboard });
                 }
+                break;
+            }
+            case CallbackAction.ViewLatestActivity: {
+                const { activities } = await jules.getAllActivities(id);
+                const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
+                const activity = filtered[filtered.length - 1]; // Most recent
+                if (!activity) return ctx.reply('No recent activity found.');
+                await showActivityDetail(ctx, bot, c.env, id, activity, 'Latest Activity', `${CallbackAction.ViewSession}:${id}`);
                 break;
             }
             case CallbackAction.ApprovePlan:
