@@ -311,7 +311,7 @@ app.post('/webhook', async (c) => {
 
   bot.command('tz', async (ctx) => {
       if (!c.env.JULES_NOTIFICATIONS_KV) {
-          return ctx.reply('❌ **Cloudflare KV not configured.**\n\nTimezone settings require a KV binding to store your preferences.', { parse_mode: 'Markdown' });
+          return await ctx.reply('❌ **Cloudflare KV not configured.**\n\nTimezone settings require a KV binding to store your preferences.', { parse_mode: 'Markdown' });
       }
 
       const arg = ctx.match?.trim();
@@ -417,11 +417,11 @@ app.post('/webhook', async (c) => {
     }
   };
 
-  bot.command('new', (ctx) => {
+  bot.command('new', async (ctx) => {
     if (!c.env.JULES_NOTIFICATIONS_KV) {
-        return ctx.reply('❌ **Cloudflare KV not configured.**\n\nThe `/new` command and interactive wizard require a KV binding to store temporary session states and handle long identifiers. Please refer to the deployment guide to configure `JULES_NOTIFICATIONS_KV`.', { parse_mode: 'Markdown' });
+        return await ctx.reply('❌ **Cloudflare KV not configured.**\n\nThe `/new` command and interactive wizard require a KV binding to store temporary session states and handle long identifiers. Please refer to the deployment guide to configure `JULES_NOTIFICATIONS_KV`.', { parse_mode: 'Markdown' });
     }
-    return showRepoList(ctx);
+    return await showRepoList(ctx);
   });
 
   bot.command('cancel', async (ctx) => {

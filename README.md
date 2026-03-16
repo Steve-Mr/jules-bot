@@ -3,9 +3,9 @@
 这是一个轻量级的 Telegram Bot，旨在让你通过 Telegram 随时随地管理 Jules AI 编码任务。它支持多 Session 管理、Plan 审批、消息交互，并提供可选的进度主动通知。
 
 ## 核心特性
-- **轻量级状态设计**：使用 Cloudflare KV 存储交互中间态，完美解决 Telegram 64 字节按钮回调限制，并支持多步骤创建向导。
+- **轻量级状态设计**：使用 Cloudflare KV 存储交互状态，支持多步骤创建向导，并解决 Telegram 64 字节按钮回调数据限制。
 - **智能交互**：支持直接“回复”Bot 消息进行聊天，以及长消息自动分块发送。
-- **详尽监控**：过滤技术噪音，提供清晰的活动流与 Plan 审批界面。
+- **活动监控**：过滤技术细节，提供清晰的活动流与 Plan 审批界面。
 
 ## 快速开始
 1. **部署**：参考 [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md) 进行 Cloudflare Workers 部署。
