@@ -225,7 +225,7 @@ export async function processTrackedSessions(env: Env, manual: boolean = false):
   if (!env.JULES_NOTIFICATIONS_KV || !env.TELEGRAM_TOKEN || !env.ADMIN_USER_ID) return { checked: 0, updated: 0 };
   const bot = new Bot(env.TELEGRAM_TOKEN);
   const jules = new JulesClient(env.JULES_API_KEY);
-  const adminId = env.ADMIN_USER_ID.split(',')[0];
+  const adminIds = env.ADMIN_USER_ID.split(',').map(id => id.trim()).filter(Boolean);
 
   let checked = 0;
   let updated = 0;
@@ -268,10 +268,13 @@ export async function processTrackedSessions(env: Env, manual: boolean = false):
             keyboard.text('📋 View Details', `${CallbackAction.ViewSession}:${entry.id}`).row();
 
             const prefix = manual ? '🔍 **Manual Status Check**' : '🔔 **Jules Task Update**';
-            await bot.api.sendMessage(adminId,
-              `${prefix}\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
-              { parse_mode: 'Markdown', reply_markup: keyboard }
-            );
+            const message = `${prefix}\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`;
+
+            // Notify all administrators. Use allSettled to prevent one failing admin from blocking others.
+            await Promise.allSettled(adminIds.map(adminId =>
+              bot.api.sendMessage(adminId, message, { parse_mode: 'Markdown', reply_markup: keyboard })
+            ));
+
             entry.lastNotifiedState = session.state;
             updated++; // Accurate for both manual (feedback sent) and auto (state changed)
           }
@@ -370,7 +373,7 @@ app.post('/webhook', async (c) => {
     const waitMsg = await ctx.reply('🔄 Checking tracked sessions...');
     const { checked, updated } = await processTrackedSessions(c.env, true);
     const tz = await getUserTimezone(c.env, ctx.from?.id);
-    await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, addTimestamp(`✅ **Status Check Complete**\n\n- Sessions checked: \`${checked}\`\n- Notifications sent: \`${updated}\`\n\n_Milestone sessions have been removed from the tracking list._`, tz), { parse_mode: 'Markdown' });
+    await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, addTimestamp(`✅ **Status Check Complete**\n\n- Sessions checked: \`${checked}\`\n- Notifications sent to admins: \`${updated}\`\n\n_Milestone sessions have been removed from the tracking list._`, tz), { parse_mode: 'Markdown' });
   });
 
   bot.command('check', async (ctx) => {
