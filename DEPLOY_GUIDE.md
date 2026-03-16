@@ -30,9 +30,9 @@
     - 添加以下必填项：
         - `CLOUDFLARE_API_TOKEN`：你的 Cloudflare API 令牌（需具备 Edit Workers 权限）。
         - `CLOUDFLARE_ACCOUNT_ID`：你的 Cloudflare 账户 ID（见第 1 步）。
-    - **(可选) 添加通知配置**：
-        - `JULES_KV_ID`：你的 Cloudflare KV 命名空间 ID。
-        - `JULES_CRON`：定时检查频率，例如 `*/5 * * * *`。
+    - **配置存储与通知**：
+        - `JULES_KV_ID`：**必填**。你的 Cloudflare KV 命名空间 ID，用于存储向导状态、回调映射及用户设置。
+        - `JULES_CRON`：**可选**。主动通知的定时检查频率，例如 `*/5 * * * *`。
 3.  **触发部署**：向 `main` 分支提交代码。
 4.  **配置环境变量**：
     - 在 Cloudflare Dashboard 找到你的项目 -> **Settings -> Variables**。
@@ -51,15 +51,15 @@
 
 ---
 
-## 3. 进阶：配置主动通知
+## 3. 必选：配置 KV 存储与可选通知
 
-为了让 Bot 能够主动推送任务进度，你需要：
+本 Bot 依赖 Cloudflare KV 来处理 `/new` 向导流程、解决 Telegram 回调数据长度限制以及存储用户偏好。
 
 1.  **创建 KV**：在 Cloudflare Dashboard 创建一个 KV 命名空间，命名为 `JULES_NOTIFICATIONS_KV`。
 2.  **关联 ID**：
     - **Actions 用户**：将得到的 ID 填入 GitHub Secret `JULES_KV_ID`。
     - **命令行用户**：手动在 Cloudflare Dashboard 的 Worker 设置中绑定该 KV。
-3.  **设置定时器**：
+3.  **设置定时器 (可选，仅用于主动通知)**：
     - **Actions 用户**：设置 Secret `JULES_CRON`（如 `*/5 * * * *`）。
     - **命令行用户**：在 Dashboard -> **Triggers** 手动添加。
 
