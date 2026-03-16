@@ -1,0 +1,21 @@
+name = "jules-tg-bot"
+main = "src/index.ts"
+compatibility_date = "2024-03-01"
+
+[vars]
+# Define variables here or in Cloudflare Dashboard
+# TELEGRAM_TOKEN, JULES_API_KEY, ADMIN_USER_ID
+
+# --- AUTOMATED BINDINGS (DO NOT REMOVE COMMENTS MANUALLY) ---
+# [[kv_namespaces]]
+# binding = "JULES_NOTIFICATIONS_KV"
+# id = "__KV_ID__"
+
+# [triggers]
+# crons = ["__CRON_SCHEDULE__"]
+# -----------------------------------------------------------
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true
