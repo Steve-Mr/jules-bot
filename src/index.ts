@@ -219,66 +219,88 @@ async function registerSession(env: Env, jules: JulesClient, sessionId: string, 
     }
 }
 
-// --- Scheduled Task ---
+// --- Scheduled & Tracking Tasks ---
 
-export async function handleScheduled(env: Env) {
-  if (!env.JULES_NOTIFICATIONS_KV || !env.TELEGRAM_TOKEN || !env.ADMIN_USER_ID) return;
+export async function processTrackedSessions(env: Env, manual: boolean = false): Promise<{ checked: number, updated: number }> {
+  if (!env.JULES_NOTIFICATIONS_KV || !env.TELEGRAM_TOKEN || !env.ADMIN_USER_ID) return { checked: 0, updated: 0 };
   const bot = new Bot(env.TELEGRAM_TOKEN);
   const jules = new JulesClient(env.JULES_API_KEY);
   const adminId = env.ADMIN_USER_ID.split(',')[0];
 
+  let checked = 0;
+  let updated = 0;
+
   try {
     const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
-    if (!raw) return;
+    if (!raw) return { checked: 0, updated: 0 };
 
     let registry: TrackedSession[] = JSON.parse(raw);
+    checked = registry.length;
     const now = Date.now();
     const updatedRegistry: TrackedSession[] = [];
     const DAY_MS = 24 * 60 * 60 * 1000;
 
     for (const entry of registry) {
+      // Cleanup old sessions (more than 24h)
       if (now - entry.createTime > DAY_MS) continue;
-      // Skip very new entries (less than 1 minute) to avoid premature terminal-state false positives or transient initial states
-      if (now - entry.createTime < 60000) {
-          updatedRegistry.push(entry);
-          continue;
+
+      // For scheduled task, skip very new entries (< 1m) to avoid race conditions
+      if (!manual && (now - entry.createTime < 60000)) {
+        updatedRegistry.push(entry);
+        continue;
       }
 
       try {
         const session = await jules.getSession(entry.id);
         const sigStates = ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'COMPLETED', 'FAILED'];
 
-        if (sigStates.includes(session.state)) {
-            // Only notify if the state has changed since last notification
-            if (session.state !== entry.lastNotifiedState) {
-                const keyboard = new InlineKeyboard();
-                if (session.state === 'AWAITING_PLAN_APPROVAL') {
-                    keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${entry.id}`).row();
-                }
-                keyboard.text('📋 View Details', `${CallbackAction.ViewSession}:${entry.id}`).row();
-                await bot.api.sendMessage(adminId,
-                  `🔔 **Jules Task Update**\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
-                  { parse_mode: 'Markdown', reply_markup: keyboard }
-                );
-                entry.lastNotifiedState = session.state;
-            }
+        const hasChanged = session.state !== entry.lastNotifiedState;
 
-            // Only remove from registry if it's a terminal state
-            if (session.state === 'COMPLETED' || session.state === 'FAILED') {
-                // Do not push back to updatedRegistry
-            } else {
-                updatedRegistry.push(entry);
+        if (sigStates.includes(session.state)) {
+          // Notify if state changed OR if it's a manual check (to provide immediate feedback)
+          // Note: If manual, we might notify even if it didn't change since last AUTO notification,
+          // because manual check intends to clear milestones from the registry.
+          if (hasChanged || manual) {
+            const keyboard = new InlineKeyboard();
+            if (session.state === 'AWAITING_PLAN_APPROVAL') {
+              keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${entry.id}`).row();
             }
-        } else {
+            keyboard.text('📋 View Details', `${CallbackAction.ViewSession}:${entry.id}`).row();
+
+            const prefix = manual ? '🔍 **Manual Status Check**' : '🔔 **Jules Task Update**';
+            await bot.api.sendMessage(adminId,
+              `${prefix}\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
+              { parse_mode: 'Markdown', reply_markup: keyboard }
+            );
+            entry.lastNotifiedState = session.state;
+            updated++; // Accurate for both manual (feedback sent) and auto (state changed)
+          }
+
+          // Removal logic:
+          // Manual: remove if milestone reached (any sigState)
+          // Auto: remove only if terminal (COMPLETED, FAILED)
+          const shouldRemove = manual || session.state === 'COMPLETED' || session.state === 'FAILED';
+
+          if (!shouldRemove) {
             updatedRegistry.push(entry);
+          }
+        } else {
+          updatedRegistry.push(entry);
         }
       } catch (e) {
-          console.error(`Error tracking ${entry.id}:`, e);
-          updatedRegistry.push(entry); // Retry next time
+        console.error(`Error tracking ${entry.id}:`, e);
+        updatedRegistry.push(entry); // Retry next time
       }
     }
     await env.JULES_NOTIFICATIONS_KV.put('track:registry', JSON.stringify(updatedRegistry));
-  } catch (e) { console.error('Cron Error:', e); }
+  } catch (e) {
+    console.error('Tracking Error:', e);
+  }
+  return { checked, updated };
+}
+
+export async function handleScheduled(env: Env) {
+  await processTrackedSessions(env, false);
 }
 
 // --- Bot App ---
@@ -309,7 +331,7 @@ app.post('/webhook', async (c) => {
   });
 
   // 1. Commands
-  bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage tasks\n/new - Create task\n/cancel - Cancel wizard\n/tz - Set timezone\n/check - Diagnostics'));
+  bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/status - Manual sync tracking\n/sessions - Manage tasks\n/new - Create task\n/cancel - Cancel wizard\n/tz - Set timezone\n/check - Diagnostics'));
 
   bot.command('tz', async (ctx) => {
       if (!c.env.JULES_NOTIFICATIONS_KV) {
@@ -342,6 +364,13 @@ app.post('/webhook', async (c) => {
           parse_mode: 'Markdown',
           reply_markup: keyboard
       });
+  });
+
+  bot.command('status', async (ctx) => {
+    const waitMsg = await ctx.reply('🔄 Checking tracked sessions...');
+    const { checked, updated } = await processTrackedSessions(c.env, true);
+    const tz = await getUserTimezone(c.env, ctx.from?.id);
+    await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, addTimestamp(`✅ **Status Check Complete**\n\n- Sessions checked: \`${checked}\`\n- Notifications sent: \`${updated}\`\n\n_Milestone sessions have been removed from the tracking list._`, tz), { parse_mode: 'Markdown' });
   });
 
   bot.command('check', async (ctx) => {
@@ -789,6 +818,7 @@ app.post('/webhook', async (c) => {
   });
 
   bot.api.setMyCommands([
+    { command: "status", description: "Manual sync tracked sessions" },
     { command: "sessions", description: "Manage tasks" },
     { command: "new", description: "Create task" },
     { command: "cancel", description: "Cancel current wizard flow" },
