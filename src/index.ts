@@ -549,13 +549,16 @@ app.post('/webhook', async (c) => {
     const replyText = replyTo?.text || replyTo?.caption || '';
     const userId = ctx.from?.id;
     const replyToId = replyTo?.message_id;
+    const kv = c.env.JULES_NOTIFICATIONS_KV;
 
-    if (!replyToId || !userId || !c.env.JULES_NOTIFICATIONS_KV) {
+    if (!replyToId || !userId || !kv) {
         return await handleIncomingText(ctx, text, replyText);
     }
 
     const mergeKeyPrefix = `m:${userId}:${replyToId}`;
-    const inProgress = await c.env.JULES_NOTIFICATIONS_KV.get(`${mergeKeyPrefix}:last`);
+    const lastKey = `${mergeKeyPrefix}:last`;
+    const chunksPrefix = `${mergeKeyPrefix}:c:`;
+    const inProgress = await kv.get(lastKey);
 
     if (!inProgress && text.length < MERGE_THRESHOLD) {
         return await handleIncomingText(ctx, text, replyText);
@@ -563,17 +566,17 @@ app.post('/webhook', async (c) => {
 
     // Merging logic
     const msgId = ctx.msgId;
-    const chunkKey = `${mergeKeyPrefix}:c:${msgId}`;
-    await c.env.JULES_NOTIFICATIONS_KV.put(chunkKey, text, { expirationTtl: 600 });
-    await c.env.JULES_NOTIFICATIONS_KV.put(`${mergeKeyPrefix}:last`, msgId.toString(), { expirationTtl: 600 });
+    const chunkKey = `${chunksPrefix}${msgId}`;
+    await kv.put(chunkKey, text, { expirationTtl: 600 });
+    await kv.put(lastKey, msgId.toString(), { expirationTtl: 600 });
 
     c.executionCtx.waitUntil((async () => {
         await new Promise(resolve => setTimeout(resolve, MERGE_WAIT_MS));
-        const lastId = await c.env.JULES_NOTIFICATIONS_KV!.get(`${mergeKeyPrefix}:last`);
+        const lastId = await kv.get(lastKey);
         if (lastId !== msgId.toString()) return; // Newer message arrived
 
         // This is the last message, perform merge
-        const list = await c.env.JULES_NOTIFICATIONS_KV!.list({ prefix: `${mergeKeyPrefix}:c:` });
+        const list = await kv.list({ prefix: chunksPrefix });
 
         // Sorting is important. Telegram message IDs are increasing.
         const sortedKeys = list.keys.sort((a, b) => {
@@ -582,14 +585,14 @@ app.post('/webhook', async (c) => {
             return idA - idB;
         });
 
-        const chunks = await Promise.all(sortedKeys.map(k => c.env.JULES_NOTIFICATIONS_KV!.get(k.name)));
+        const chunks = await Promise.all(sortedKeys.map(k => kv.get(k.name)));
         const combinedText = chunks.filter(c => c !== null).join('');
 
         await handleIncomingText(ctx, combinedText, replyText, chunks.length);
 
         // Cleanup
-        await Promise.all(sortedKeys.map(k => c.env.JULES_NOTIFICATIONS_KV!.delete(k.name)));
-        await c.env.JULES_NOTIFICATIONS_KV!.delete(`${mergeKeyPrefix}:last`);
+        await Promise.all(sortedKeys.map(k => kv.delete(k.name)));
+        await kv.delete(lastKey);
     })());
   });
 
