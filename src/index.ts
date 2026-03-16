@@ -366,6 +366,7 @@ app.post('/webhook', async (c) => {
               report += `❌ KV: Error (${errorMessage})\n`;
           }
       } else report += `ℹ️ KV: Not bound\n`;
+      report += "\n";
       try { await jules.listSources(); report += `✅ API: Connected\n`; }
       catch (e: unknown) {
           const errorMessage = e instanceof Error ? e.message : String(e);
