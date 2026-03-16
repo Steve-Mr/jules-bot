@@ -310,19 +310,19 @@ app.post('/webhook', async (c) => {
   bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage tasks\n/new - Create task\n/cancel - Cancel wizard\n/tz - Set timezone\n/check - Diagnostics'));
 
   bot.command('tz', async (ctx) => {
+      if (!c.env.JULES_NOTIFICATIONS_KV) {
+          return await ctx.reply('❌ **Cloudflare KV not configured.**\n\nTimezone settings require a KV binding to store your preferences.', { parse_mode: 'Markdown' });
+      }
+
       const arg = ctx.match?.trim();
       if (arg) {
           try {
               // Validate timezone
               new Intl.DateTimeFormat('en-GB', { timeZone: arg });
-              if (c.env.JULES_NOTIFICATIONS_KV) {
-                  const userId = ctx.from?.id;
-                  if (!userId) return await ctx.reply('❌ Unable to identify user.');
-                  await c.env.JULES_NOTIFICATIONS_KV.put(`tz:${userId}`, arg);
-                  return await ctx.reply(`✅ Timezone updated to \`${arg}\``, { parse_mode: 'Markdown' });
-              } else {
-                  return await ctx.reply('❌ KV not configured.');
-              }
+              const userId = ctx.from?.id;
+              if (!userId) return await ctx.reply('❌ Unable to identify user.');
+              await c.env.JULES_NOTIFICATIONS_KV.put(`tz:${userId}`, arg);
+              return await ctx.reply(`✅ Timezone updated to \`${arg}\``, { parse_mode: 'Markdown' });
           } catch {
               return await ctx.reply(`❌ Invalid timezone: \`${arg}\`\n\nExamples:\n- \`Asia/Shanghai\`\n- \`Europe/London\`\n- \`UTC\``, { parse_mode: 'Markdown' });
           }
@@ -417,7 +417,12 @@ app.post('/webhook', async (c) => {
     }
   };
 
-  bot.command('new', (ctx) => showRepoList(ctx));
+  bot.command('new', async (ctx) => {
+    if (!c.env.JULES_NOTIFICATIONS_KV) {
+        return await ctx.reply('❌ **Cloudflare KV not configured.**\n\nThe `/new` command and interactive wizard require a KV binding to store temporary session states and handle long identifiers. Please refer to the deployment guide to configure `JULES_NOTIFICATIONS_KV`.', { parse_mode: 'Markdown' });
+    }
+    return await showRepoList(ctx);
+  });
 
   bot.command('cancel', async (ctx) => {
       if (!c.env.JULES_NOTIFICATIONS_KV) return ctx.reply('❌ KV not configured.');
