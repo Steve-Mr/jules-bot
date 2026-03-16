@@ -1,12 +1,26 @@
 import { Hono } from 'hono';
 import { Bot, webhookCallback, InlineKeyboard, GrammyError, HttpError, Api, RawApi, CallbackQueryContext, Context as BotContext } from 'grammy';
+import { I18n, I18nFlavor } from '@grammyjs/i18n';
 import { Env, JulesClient, CreateSessionOptions } from './lib/jules';
+import { en } from './locales/en';
+import { zh } from './locales/zh';
 
 const app = new Hono<{ Bindings: Env }>();
+
+type MyContext = BotContext & I18nFlavor;
+
+const i18n = new I18n<MyContext>({
+    defaultLocale: 'en',
+    useSession: false, // We use KV for persistence, not grammY sessions
+});
+
+i18n.loadLocale('en', { source: en });
+i18n.loadLocale('zh', { source: zh });
 
 const WIZARD_EXPIRATION_TTL = 1800; // 30 minutes
 
 const CallbackAction = {
+    SetLanguage: 'set_lang',
     SetTimezone: 'set_tz',
     WizardRepoPage: 'wiz_repo_page',
     WizardRepo: 'wiz_repo',
@@ -42,7 +56,7 @@ function escapeMarkdown(text: string): string {
     return text.replace(/([_*\[`])/g, '\\$1');
 }
 
-async function sendLongMessage(bot: Bot, chatId: string | number, text: string, options: Parameters<Api<RawApi>["sendMessage"]>[2] = {}) {
+async function sendLongMessage(bot: Bot<any>, chatId: string | number, text: string, options: Parameters<Api<RawApi>["sendMessage"]>[2] = {}) {
     const CHUNK_SIZE = 4000;
     for (let i = 0; i < text.length; i += CHUNK_SIZE) {
         await bot.api.sendMessage(chatId, text.substring(i, i + CHUNK_SIZE), options);
@@ -61,22 +75,22 @@ function getActivityType(activity: any): string {
     return 'ACTIVITY';
 }
 
-function getFriendlyType(type: string): string {
+function getFriendlyType(type: string, t: (key: string, vars?: any) => string): string {
     const map: Record<string, string> = {
-        'PLAN_GENERATED': '📋 Plan Generated',
-        'PLAN_APPROVED': '✅ Plan Approved',
-        'USER_MESSAGED': '👤 Your Message',
-        'AGENT_MESSAGED': '🤖 Jules Message',
-        'SESSION_COMPLETED': '🎉 Task Completed',
-        'SESSION_FAILED': '❌ Task Failed',
-        'AWAITING_PLAN_APPROVAL': '⚠️ Waiting for Approval',
-        'AWAITING_USER_FEEDBACK': '❓ Waiting for Feedback',
-        'PROGRESS_UPDATED': '🔄 Progress'
+        'PLAN_GENERATED': t('status-plan-generated'),
+        'PLAN_APPROVED': t('status-plan-approved'),
+        'USER_MESSAGED': t('status-user-messaged'),
+        'AGENT_MESSAGED': t('status-agent-messaged'),
+        'SESSION_COMPLETED': t('status-completed'),
+        'SESSION_FAILED': t('status-failed'),
+        'AWAITING_PLAN_APPROVAL': t('status-awaiting-approval'),
+        'AWAITING_USER_FEEDBACK': t('status-awaiting-feedback'),
+        'PROGRESS_UPDATED': t('status-progress')
     };
     return map[type] || type || 'ACTIVITY';
 }
 
-function addTimestamp(text: string, timezone: string = 'UTC'): string {
+function addTimestamp(text: string, t: (key: string, vars?: any) => string, timezone: string = 'UTC'): string {
     const now = new Date();
     try {
         const timeStr = new Intl.DateTimeFormat('en-GB', {
@@ -86,16 +100,21 @@ function addTimestamp(text: string, timezone: string = 'UTC'): string {
             hour12: false,
             timeZone: timezone
         }).format(now);
-        return `${text}\n\n🕒 _Last updated: ${timeStr} (${timezone})_`;
+        return `${text}\n\n${t('last-updated', { time: timeStr, tz: timezone })}`;
     } catch {
         const timeStr = now.toTimeString().slice(0, 8);
-        return `${text}\n\n🕒 _Last updated: ${timeStr} (UTC-Fallback)_`;
+        return `${text}\n\n${t('last-updated-fallback', { time: timeStr })}`;
     }
 }
 
 async function getUserTimezone(env: Env, userId?: number): Promise<string> {
     if (!userId || !env.JULES_NOTIFICATIONS_KV) return 'UTC';
     return await env.JULES_NOTIFICATIONS_KV.get(`tz:${userId}`) || 'UTC';
+}
+
+async function getUserLanguage(env: Env, userId?: number): Promise<string | undefined> {
+    if (!userId || !env.JULES_NOTIFICATIONS_KV) return undefined;
+    return await env.JULES_NOTIFICATIONS_KV.get(`lang:${userId}`) || undefined;
 }
 
 function isMessageNotModifiedError(e: unknown): boolean {
@@ -110,34 +129,34 @@ function isMessageNotModifiedError(e: unknown): boolean {
     return msg?.includes('message is not modified') ?? false;
 }
 
-function getSummary(activity: any, verbose = true): string {
+function getSummary(activity: any, t: (key: string, vars?: any) => string, verbose = true): string {
     let raw = '';
     if (activity.agentMessaged?.agentMessage) raw = activity.agentMessaged.agentMessage;
     else if (activity.userMessaged?.userMessage) raw = activity.userMessaged.userMessage;
-    else if (activity.planGenerated?.plan) raw = `Plan with ${activity.planGenerated.plan.steps?.length || 0} steps ready.`;
+    else if (activity.planGenerated?.plan) raw = t('plan-steps-ready', { count: activity.planGenerated.plan.steps?.length || 0 });
     else if (activity.description) raw = activity.description;
     else if (activity.summary) raw = activity.summary;
     else if (activity.status?.message) raw = activity.status.message;
     else if (activity.userRequest?.prompt) raw = activity.userRequest.prompt;
     else if (activity.agentResponse?.text) raw = activity.agentResponse.text;
     else if (activity.progressUpdated?.description) raw = activity.progressUpdated.description;
-    else if (activity.sessionCompleted) raw = 'The task was completed successfully.';
+    else if (activity.sessionCompleted) raw = t('msg-task-completed');
     else if (activity.sessionFailed?.reason) raw = activity.sessionFailed.reason;
-    else if (activity.sessionFailed) raw = 'The task failed to complete.';
+    else if (activity.sessionFailed) raw = t('msg-task-failed');
 
     if (!raw && activity.artifacts && activity.artifacts.length > 0) {
-        raw = 'Code changes applied.';
+        raw = t('msg-code-changes');
     }
 
-    if (!raw) raw = '(No details available)';
+    if (!raw) raw = t('msg-no-details');
 
     if (!verbose && raw.length > 60) return raw.substring(0, 57) + '...';
     return raw;
 }
 
-function formatPlan(activities: any[]): string {
+function formatPlan(activities: any[], t: (key: string, vars?: any) => string): string {
     const planActivity = activities.find(a => a.type === 'PLAN_GENERATED' || a.planGenerated);
-    if (!planActivity) return 'Check details on GitHub or Jules web app.';
+    if (!planActivity) return t('plan-no-details');
     const plan = planActivity.planGenerated?.plan;
     if (plan && plan.steps) {
         return plan.steps.map((s: any, idx: number) => {
@@ -145,7 +164,7 @@ function formatPlan(activities: any[]): string {
             return `**${displayIndex}. ${escapeMarkdown(s.title)}**\n${escapeMarkdown(s.description)}`;
         }).join('\n\n');
     }
-    return escapeMarkdown(getSummary(planActivity));
+    return escapeMarkdown(getSummary(planActivity, t));
 }
 
 // Map long callback data to short KV keys if needed
@@ -226,6 +245,9 @@ export async function handleScheduled(env: Env) {
   const adminId = env.ADMIN_USER_ID.split(',')[0];
 
   try {
+    const adminLang = await getUserLanguage(env, parseInt(adminId)) || 'en';
+    const t = (key: string, vars?: any) => i18n.t(adminLang, key, vars);
+
     const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
     if (!raw) return;
 
@@ -251,13 +273,16 @@ export async function handleScheduled(env: Env) {
             if (session.state !== entry.lastNotifiedState) {
                 const keyboard = new InlineKeyboard();
                 if (session.state === 'AWAITING_PLAN_APPROVAL') {
-                    keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${entry.id}`).row();
+                    keyboard.text(t('btn-approve'), `${CallbackAction.ApprovePlan}:${entry.id}`).row();
                 }
-                keyboard.text('📋 View Details', `${CallbackAction.ViewSession}:${entry.id}`).row();
-                await bot.api.sendMessage(adminId,
-                  `🔔 **Jules Task Update**\n\n**Title:** ${escapeMarkdown(entry.title)}\n**Status:** \`${session.state}\`\n\nReached milestone.`,
-                  { parse_mode: 'Markdown', reply_markup: keyboard }
-                );
+                keyboard.text(t('btn-activities'), `${CallbackAction.ViewSession}:${entry.id}`).row();
+
+                let notifyMsg = `${t('notify-title')}\n\n`;
+                notifyMsg += `${t('session-view-title', { title: escapeMarkdown(entry.title) })}\n`;
+                notifyMsg += `${t('session-view-status', { status: session.state })}\n\n`;
+                notifyMsg += t('notify-reached-milestone');
+
+                await bot.api.sendMessage(adminId, notifyMsg, { parse_mode: 'Markdown', reply_markup: keyboard });
                 entry.lastNotifiedState = session.state;
             }
 
@@ -282,7 +307,18 @@ export async function handleScheduled(env: Env) {
 // --- Bot App ---
 
 app.post('/webhook', async (c) => {
-  const bot = new Bot(c.env.TELEGRAM_TOKEN);
+  const bot = new Bot<MyContext>(c.env.TELEGRAM_TOKEN);
+
+  bot.use(i18n);
+  bot.use(async (ctx, next) => {
+      const userId = ctx.from?.id;
+      const kvLang = await getUserLanguage(c.env, userId);
+      if (kvLang) {
+          await ctx.i18n.setLocale(kvLang);
+      }
+      return next();
+  });
+
   const adminIds = c.env.ADMIN_USER_ID?.split(',').map(id => id.trim()) || [];
   const jules = new JulesClient(c.env.JULES_API_KEY);
 
@@ -293,21 +329,34 @@ app.post('/webhook', async (c) => {
     console.error(`Bot Error:`, err.error);
     const adminId = adminIds[0];
     if (adminId) {
-        let errMsg = `❌ **Bot Error**\n\n`;
-        if (err instanceof GrammyError) errMsg += `Grammy: ${err.message}`;
-        else if (err instanceof HttpError) errMsg += `Telegram: ${err.message}`;
-        else errMsg += `Error: ${String(err.error)}`;
+        let errMsg = `${ctx.t('error-prefix')}\n\n`;
+        if (err instanceof GrammyError) errMsg += ctx.t('error-grammy', { message: err.message });
+        else if (err instanceof HttpError) errMsg += ctx.t('error-telegram', { message: err.message });
+        else errMsg += ctx.t('error-generic', { message: String(err.error) });
         bot.api.sendMessage(adminId, errMsg, { parse_mode: 'Markdown' }).catch(() => {});
     }
   });
 
   bot.use(async (ctx, next) => {
     if (ctx.from && adminIds.includes(ctx.from.id.toString())) return next();
-    if (ctx.message?.text?.startsWith('/')) await ctx.reply('🚫 Unauthorized.');
+    if (ctx.message?.text?.startsWith('/')) await ctx.reply(ctx.t('unauthorized'));
   });
 
   // 1. Commands
-  bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/sessions - Manage tasks\n/new - Create task\n/cancel - Cancel wizard\n/tz - Set timezone\n/check - Diagnostics'));
+  bot.command('start', (ctx) => ctx.reply(ctx.t('start-msg')));
+
+  bot.command('lang', async (ctx) => {
+      const keyboard = new InlineKeyboard()
+          .text('English 🇺🇸', `${CallbackAction.SetLanguage}:en`)
+          .text('中文 🇨🇳', `${CallbackAction.SetLanguage}:zh`);
+
+      const currentLocale = await ctx.i18n.getLocale();
+      const text = `${ctx.t('lang-title')}\n\n${ctx.t('lang-current', { lang: currentLocale })}\n\n${ctx.t('lang-select')}`;
+      await ctx.reply(text, {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+      });
+  });
 
   bot.command('tz', async (ctx) => {
       const arg = ctx.match?.trim();
@@ -319,12 +368,12 @@ app.post('/webhook', async (c) => {
                   const userId = ctx.from?.id;
                   if (!userId) return await ctx.reply('❌ Unable to identify user.');
                   await c.env.JULES_NOTIFICATIONS_KV.put(`tz:${userId}`, arg);
-                  return await ctx.reply(`✅ Timezone updated to \`${arg}\``, { parse_mode: 'Markdown' });
+                  return await ctx.reply(ctx.t('tz-updated', { tz: arg }), { parse_mode: 'Markdown' });
               } else {
-                  return await ctx.reply('❌ KV not configured.');
+                  return await ctx.reply(ctx.t('cancel-no-kv'));
               }
           } catch {
-              return await ctx.reply(`❌ Invalid timezone: \`${arg}\`\n\nExamples:\n- \`Asia/Shanghai\`\n- \`Europe/London\`\n- \`UTC\``, { parse_mode: 'Markdown' });
+              return await ctx.reply(ctx.t('tz-invalid', { tz: arg }), { parse_mode: 'Markdown' });
           }
       }
 
@@ -336,41 +385,42 @@ app.post('/webhook', async (c) => {
           .text('UTC', `${CallbackAction.SetTimezone}:UTC`).row();
 
       const tz = await getUserTimezone(c.env, ctx.from?.id);
-      await ctx.reply(`🕒 **Timezone Settings**\n\nCurrent: \`${tz}\`\n\nSelect a timezone or use: \`/tz Asia/Shanghai\``, {
+      const tzText = `${ctx.t('tz-title')}\n\n${ctx.t('tz-current', { tz })}\n\n${ctx.t('tz-select')}`;
+      await ctx.reply(tzText, {
           parse_mode: 'Markdown',
           reply_markup: keyboard
       });
   });
 
   bot.command('check', async (ctx) => {
-      let report = "🛠 **System Check**\n\n";
+      let report = `${ctx.t('check-report-title')}\n\n`;
       const userId = ctx.from?.id;
-      report += `✅ Admin ID: \`${userId || 'unknown'}\`\n`;
-      report += `✅ API Key: ${c.env.JULES_API_KEY ? 'OK' : '❌'}\n`;
-      report += `✅ Webhook Secret: ${c.env.WEBHOOK_SECRET_TOKEN ? 'OK' : '❌ (Optional)'}\n`;
+      report += ctx.t('check-admin-id', { id: userId || 'unknown' }) + '\n';
+      report += ctx.t('check-api-key', { status: c.env.JULES_API_KEY ? 'OK' : '❌' }) + '\n';
+      report += ctx.t('check-webhook-secret', { status: c.env.WEBHOOK_SECRET_TOKEN ? 'OK' : '❌ (Optional)' }) + '\n';
       if (c.env.JULES_NOTIFICATIONS_KV) {
           try {
               await c.env.JULES_NOTIFICATIONS_KV.put('check_v9', 'ok');
               const raw = await c.env.JULES_NOTIFICATIONS_KV.get('track:registry');
               const registry: TrackedSession[] = raw ? JSON.parse(raw) : [];
-              report += `✅ KV: Working\n\n**Tracking List (${registry.length}):**\n`;
+              report += ctx.t('check-kv-working') + '\n\n' + ctx.t('check-tracking-list', { count: registry.length }) + '\n';
               if (registry.length > 0) {
                   registry.forEach(s => {
                       const ageMin = Math.round((Date.now() - s.createTime) / 60000);
                       report += `- \`${s.id}\`: ${escapeMarkdown(s.title)} (${ageMin}m ago)\n`;
                   });
-              } else report += "_No sessions currently being tracked._";
+              } else report += ctx.t('check-no-sessions');
           }
           catch (e: unknown) {
               const errorMessage = e instanceof Error ? e.message : String(e);
-              report += `❌ KV: Error (${errorMessage})\n`;
+              report += ctx.t('check-kv-error', { error: errorMessage }) + '\n';
           }
-      } else report += `ℹ️ KV: Not bound\n`;
+      } else report += ctx.t('check-kv-not-bound') + '\n';
       report += "\n";
-      try { await jules.listSources(); report += `✅ API: Connected\n`; }
+      try { await jules.listSources(); report += ctx.t('check-api-connected') + '\n'; }
       catch (e: unknown) {
           const errorMessage = e instanceof Error ? e.message : String(e);
-          report += `❌ API: Failed (${errorMessage})\n`;
+          report += ctx.t('check-api-failed', { error: errorMessage }) + '\n';
       }
       await ctx.reply(report, { parse_mode: 'Markdown' });
   });
@@ -378,23 +428,23 @@ app.post('/webhook', async (c) => {
   bot.command('sessions', async (ctx) => {
     try {
       const { sessions } = await jules.listSessions();
-      if (!sessions || sessions.length === 0) return ctx.reply('No active sessions.');
+      if (!sessions || sessions.length === 0) return ctx.reply(ctx.t('sessions-none'));
       const keyboard = new InlineKeyboard();
       sessions.slice(0, 10).forEach((s) => {
         const id = s.name.split('/').pop() || 'unknown';
         keyboard.text(`📝 ${s.title || s.displayName || id}`, `${CallbackAction.ViewSession}:${id}`).row();
       });
-      await ctx.reply('Recent Sessions:', { reply_markup: keyboard });
+      await ctx.reply(ctx.t('sessions-recent'), { reply_markup: keyboard });
     } catch (e: unknown) {
         const errorMessage = e instanceof Error ? e.message : String(e);
-        await ctx.reply(`❌ Error: ${errorMessage}`);
+        await ctx.reply(`${ctx.t('error-prefix')}\n\n${ctx.t('error-generic', { message: errorMessage })}`);
     }
   });
 
-  const showRepoList = async (ctx: BotContext, pageToken?: string) => {
+  const showRepoList = async (ctx: MyContext, pageToken?: string) => {
     try {
       const { sources, nextPageToken } = await jules.listSources({ pageSize: 8, pageToken });
-      if (!sources || sources.length === 0) return ctx.reply('No repositories found.');
+      if (!sources || sources.length === 0) return ctx.reply(ctx.t('msg-no-details'));
       const keyboard = new InlineKeyboard();
       for (const src of sources) {
           const name = src.name.split('/').pop() || 'unknown';
@@ -403,47 +453,47 @@ app.post('/webhook', async (c) => {
       }
       if (nextPageToken) {
           const nextCb = await getCallbackData(c.env, CallbackAction.WizardRepoPage, '', nextPageToken);
-          keyboard.row().text('Next ➡️', nextCb);
+          keyboard.row().text(ctx.t('btn-next'), nextCb);
       }
 
       const tz = await getUserTimezone(c.env, ctx.from?.id);
-      const text = addTimestamp('🚀 Step 1: Select a repository:', tz);
+      const text = addTimestamp(ctx.t('wizard-step-repo'), ctx.t, tz);
       if (ctx.callbackQuery) await ctx.editMessageText(text, { reply_markup: keyboard });
       else await ctx.reply(text, { reply_markup: keyboard });
     } catch (e: unknown) {
         if (isMessageNotModifiedError(e)) return;
         const errorMessage = e instanceof Error ? e.message : String(e);
-        await ctx.reply(`❌ Error: ${errorMessage}`);
+        await ctx.reply(`${ctx.t('error-prefix')}\n\n${ctx.t('error-generic', { message: errorMessage })}`);
     }
   };
 
   bot.command('new', (ctx) => showRepoList(ctx));
 
   bot.command('cancel', async (ctx) => {
-      if (!c.env.JULES_NOTIFICATIONS_KV) return ctx.reply('❌ KV not configured.');
+      if (!c.env.JULES_NOTIFICATIONS_KV) return ctx.reply(ctx.t('cancel-no-kv'));
       const userId = ctx.from?.id;
       if (!userId) return ctx.reply('❌ Unable to identify user.');
       await clearUserWizards(c.env, userId);
-      await ctx.reply('✅ All ongoing /new wizard flows have been cancelled.');
+      await ctx.reply(ctx.t('cancel-success'));
   });
 
   bot.command('reply', async (ctx) => {
     const match = ctx.message?.text?.match(/\/reply\s+([^\s]+)\s+(.+)/);
-    if (!match) return ctx.reply('Usage: /reply [session_id] [message]');
+    if (!match) return ctx.reply(ctx.t('reply-usage'));
     const sid = match[1];
     try {
       await jules.sendMessage(sid, match[2]);
       await registerSession(c.env, jules, sid);
-      await ctx.reply(`✅ Sent to \`${sid}\`. (Now tracking)`);
+      await ctx.reply(ctx.t('reply-success', { id: sid }));
     } catch (e: unknown) {
         const errorMessage = e instanceof Error ? e.message : String(e);
-        await ctx.reply(`❌ Failed: ${errorMessage}`);
+        await ctx.reply(ctx.t('reply-failed', { error: errorMessage }));
     }
   });
 
   bot.command('start_session', async (ctx) => {
     const parts = ctx.message?.text?.split(/\s+/) || [];
-    if (parts.length < 3) return ctx.reply('Usage: /start_session [source] [options] [prompt]');
+    if (parts.length < 3) return ctx.reply(ctx.t('start-session-usage'));
     const sourceName = parts[1];
     let promptParts = [];
     const options: CreateSessionOptions = {};
@@ -458,15 +508,15 @@ app.post('/webhook', async (c) => {
         } else promptParts.push(p);
     }
     const prompt = promptParts.join(' ');
-    if (!prompt) return ctx.reply('Please provide a prompt.');
+    if (!prompt) return ctx.reply(ctx.t('start-session-no-prompt'));
     try {
       const session = await jules.createSession(sourceName, prompt, options);
       const sessionId = session.name.split('/').pop() || 'unknown';
       await registerSession(c.env, jules, sessionId, options.title || prompt.substring(0, 30));
-      await ctx.reply(`🚀 Started! ID: \`${sessionId}\``);
+      await ctx.reply(ctx.t('start-session-success', { id: sessionId }));
     } catch (e: unknown) {
         const errorMessage = e instanceof Error ? e.message : String(e);
-        await ctx.reply(`❌ Failed: ${errorMessage}`);
+        await ctx.reply(`${ctx.t('error-prefix')}\n\n${ctx.t('error-generic', { message: errorMessage })}`);
     }
   });
 
@@ -491,13 +541,13 @@ app.post('/webhook', async (c) => {
                 // Cleanup wizard state
                 await deleteWizardState(c.env, wizId, state.userId);
 
-                return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Tracked)`);
+                return ctx.reply(ctx.t('session-started', { id: sid }));
             } catch (e: unknown) {
                 const errorMessage = e instanceof Error ? e.message : String(e);
-                return ctx.reply(`❌ Failed to create session: ${errorMessage}`);
+                return ctx.reply(`${ctx.t('error-prefix')}\n\n${ctx.t('error-generic', { message: errorMessage })}`);
             }
         } else {
-            return ctx.reply('⚠️ Wizard session expired or not found. Please start over with /new.');
+            return ctx.reply(ctx.t('wizard-expired'));
         }
     }
 
@@ -526,30 +576,30 @@ app.post('/webhook', async (c) => {
         try {
           await jules.sendMessage(sessionId, text);
           await registerSession(c.env, jules, sessionId);
-          return ctx.reply(`✅ Sent to session \`${sessionId}\`. (Now tracking)`, { reply_to_message_id: ctx.message.message_id });
+          return ctx.reply(ctx.t('reply-success', { id: sessionId }), { reply_to_message_id: ctx.message.message_id });
         } catch (e: unknown) {
             const errorMessage = e instanceof Error ? e.message : String(e);
-            return ctx.reply(`❌ Failed to send: ${errorMessage}`);
+            return ctx.reply(ctx.t('reply-failed', { error: errorMessage }));
         }
       }
     }
 
-    await ctx.reply('Use /help or reply to a session message to chat.');
+    await ctx.reply(ctx.t('session-chat-help'));
   });
 
   // 3. Callback Handlers
-  const approvePlan = async (ctx: BotContext, sessionId: string) => {
+  const approvePlan = async (ctx: MyContext, sessionId: string) => {
     await jules.approvePlan(sessionId);
     await registerSession(c.env, jules, sessionId);
     const session = await jules.getSession(sessionId);
     const title = session.title || session.displayName || sessionId;
     const keyboard = new InlineKeyboard()
-            .text('🔄 Refresh', `${CallbackAction.ViewSession}:${sessionId}`)
-            .text('📋 Activities', `${CallbackAction.Activities}:${sessionId}`).row()
-            .text('📋 View Plan', `${CallbackAction.PlanView}:${sessionId}`)
-            .text('🔙 List', CallbackAction.SessionsBack);
+            .text(ctx.t('btn-refresh'), `${CallbackAction.ViewSession}:${sessionId}`)
+            .text(ctx.t('btn-activities'), `${CallbackAction.Activities}:${sessionId}`).row()
+            .text(ctx.t('btn-view-plan'), `${CallbackAction.PlanView}:${sessionId}`)
+            .text(ctx.t('btn-list'), CallbackAction.SessionsBack);
     const tz = await getUserTimezone(c.env, ctx.from?.id);
-    const text = addTimestamp(`✅ Approved! Current status: \`${session.state}\`\n\n**Session:** ${escapeMarkdown(title)}\n**ID:** \`${sessionId}\``, tz);
+    const text = addTimestamp(`${ctx.t('status-plan-approved')}! ${ctx.t('session-view-status', { status: session.state })}\n\n${ctx.t('session-view-title', { title: escapeMarkdown(title) })}\n${ctx.t('session-view-id', { id: sessionId })}`, ctx.t, tz);
     await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
   };
 
@@ -566,6 +616,16 @@ app.post('/webhook', async (c) => {
 
     const handleAction = async () => {
         switch (action) {
+            case CallbackAction.SetLanguage: {
+                const newLang = id;
+                if (!c.env.JULES_NOTIFICATIONS_KV) return await ctx.reply(ctx.t('cancel-no-kv'));
+                const userId = ctx.from?.id;
+                if (!userId) return await ctx.reply('❌ Unable to identify user.');
+                await c.env.JULES_NOTIFICATIONS_KV.put(`lang:${userId}`, newLang);
+                await ctx.i18n.setLocale(newLang);
+                await ctx.editMessageText(ctx.t('lang-updated'), { parse_mode: 'Markdown' });
+                break;
+            }
             case CallbackAction.SetTimezone: {
                 const newTz = id;
                 if (!c.env.JULES_NOTIFICATIONS_KV) return await ctx.reply('❌ KV not configured.');
@@ -582,7 +642,7 @@ app.post('/webhook', async (c) => {
                 const targetRepo = args[2] || subId;
                 const { sources } = await jules.listSources({ pageSize: 100 });
                 const source = sources?.find((s) => s.name === targetRepo);
-                if (!source) return ctx.reply('Source not found.');
+                if (!source) return ctx.reply(ctx.t('msg-no-details'));
                 const branches = source.githubRepo?.branches?.map((b) => b.displayName) || ['main'];
                 const userId = ctx.from?.id;
                 if (!userId) return await ctx.reply('❌ Unable to identify user.');
@@ -592,39 +652,53 @@ app.post('/webhook', async (c) => {
                     keyboard.text(br, `${CallbackAction.WizardBranch}:${wizId}:${idx}`).row();
                 });
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
-                await ctx.editMessageText(addTimestamp(`📂 Repo: \`${targetRepo}\`\n\n🚀 Step 2: Select branch:`, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
+                const text = addTimestamp(`${ctx.t('wizard-repo-label', { repo: targetRepo })}\n\n${ctx.t('wizard-step-branch')}`, ctx.t, tz);
+                await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
                 break;
             }
             case CallbackAction.WizardBranch: {
                 const state = await getWizardState(c.env, id);
-                if (!state || !state.branches) return ctx.reply('Wizard expired. Start over with /new.');
+                if (!state || !state.branches) return ctx.reply(ctx.t('wizard-expired'));
                 state.startingBranch = state.branches[parseInt(subId)];
                 const wizId = await saveWizardState(c.env, state);
                 const keyboard = new InlineKeyboard()
-                    .text('📋 Interactive', `${CallbackAction.WizardMode}:${wizId}:int`).row()
-                    .text('⚡ Auto', `${CallbackAction.WizardMode}:${wizId}:auto`).row();
+                    .text(`📋 ${ctx.t('wizard-mode-interactive')}`, `${CallbackAction.WizardMode}:${wizId}:int`).row()
+                    .text(`⚡ ${ctx.t('wizard-mode-auto')}`, `${CallbackAction.WizardMode}:${wizId}:auto`).row();
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
-                await ctx.editMessageText(addTimestamp(`📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n\n🚀 Step 3: Select mode:`, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
+                const text = addTimestamp(`${ctx.t('wizard-repo-label', { repo: state.source })}\n${ctx.t('wizard-branch-label', { branch: state.startingBranch || '' })}\n\n${ctx.t('wizard-step-mode')}`, ctx.t, tz);
+                await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
                 break;
             }
             case CallbackAction.WizardMode: {
                 const state = await getWizardState(c.env, id);
-                if (!state) return ctx.reply('Wizard expired.');
+                if (!state) return ctx.reply(ctx.t('wizard-expired'));
                 state.requirePlanApproval = (subId === 'int');
                 const wizId = await saveWizardState(c.env, state);
                 const keyboard = new InlineKeyboard()
-                    .text('✅ Yes', `${CallbackAction.WizardPR}:${wizId}:yes`)
-                    .text('❌ No', `${CallbackAction.WizardPR}:${wizId}:no`).row();
+                    .text(ctx.t('btn-yes'), `${CallbackAction.WizardPR}:${wizId}:yes`)
+                    .text(ctx.t('btn-no'), `${CallbackAction.WizardPR}:${wizId}:no`).row();
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
-                await ctx.editMessageText(addTimestamp(`🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n\n🚀 Step 4: Auto PR?`, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
+                const modeStr = state.requirePlanApproval ? ctx.t('wizard-mode-interactive') : ctx.t('wizard-mode-auto');
+                const text = addTimestamp(`${ctx.t('wizard-mode-label', { mode: modeStr })}\n\n${ctx.t('wizard-step-pr')}`, ctx.t, tz);
+                await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
                 break;
             }
             case CallbackAction.WizardPR: {
                 const state = await getWizardState(c.env, id);
-                if (!state) return ctx.reply('Wizard expired.');
+                if (!state) return ctx.reply(ctx.t('wizard-expired'));
                 state.automationMode = (subId === 'yes' ? 'AUTO_CREATE_PR' : 'AUTOMATION_MODE_UNSPECIFIED');
                 const wizId = await saveWizardState(c.env, state);
-                await ctx.reply(`🚀 **READY TO START**\n\n📂 Repo: \`${state.source}\`\n🌿 Branch: \`${state.startingBranch}\`\n🛠 Mode: \`${state.requirePlanApproval ? 'Interactive' : 'Auto'}\`\n📦 PR: \`${state.automationMode === 'AUTO_CREATE_PR' ? 'Yes' : 'No'}\`\n\n**WizID:** \`${wizId}\`\nReply with your task prompt:`, {
+                const modeStr = state.requirePlanApproval ? ctx.t('wizard-mode-interactive') : ctx.t('wizard-mode-auto');
+                const prStr = state.automationMode === 'AUTO_CREATE_PR' ? ctx.t('btn-yes') : ctx.t('btn-no');
+
+                let readyMsg = `${ctx.t('wizard-ready-title')}\n\n`;
+                readyMsg += `${ctx.t('wizard-repo-label', { repo: state.source })}\n`;
+                readyMsg += `${ctx.t('wizard-branch-label', { branch: state.startingBranch || '' })}\n`;
+                readyMsg += `${ctx.t('wizard-mode-label', { mode: modeStr })}\n`;
+                readyMsg += `${ctx.t('wizard-pr-label', { pr: prStr })}\n\n`;
+                readyMsg += `**WizID:** \`${wizId}\`\n${ctx.t('wizard-reply-prompt')}`;
+
+                await ctx.reply(readyMsg, {
                     parse_mode: 'Markdown',
                     reply_markup: { force_reply: true }
                 });
@@ -635,22 +709,25 @@ app.post('/webhook', async (c) => {
                 const title = session.title || session.displayName || id;
                 const keyboard = new InlineKeyboard();
                 if (session.state === 'AWAITING_PLAN_APPROVAL') {
-                    keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${id}`).row();
+                    keyboard.text(ctx.t('btn-approve'), `${CallbackAction.ApprovePlan}:${id}`).row();
                 }
-                keyboard.text('🔄 Refresh', `${CallbackAction.ViewSession}:${id}`)
-                        .text('📋 Activities', `${CallbackAction.Activities}:${id}`).row()
-                        .text('📋 View Plan', `${CallbackAction.PlanView}:${id}`)
-                        .text('🔙 List', CallbackAction.SessionsBack);
+                keyboard.text(ctx.t('btn-refresh'), `${CallbackAction.ViewSession}:${id}`)
+                        .text(ctx.t('btn-activities'), `${CallbackAction.Activities}:${id}`).row()
+                        .text(ctx.t('btn-view-plan'), `${CallbackAction.PlanView}:${id}`)
+                        .text(ctx.t('btn-list'), CallbackAction.SessionsBack);
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
-                const text = addTimestamp(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, tz);
-                await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+                let text = `${ctx.t('session-view-title', { title: escapeMarkdown(title) })}\n`;
+                text += `${ctx.t('session-view-id', { id })}\n`;
+                text += `${ctx.t('session-view-status', { status: session.state })}\n\n`;
+                text += ctx.t('session-view-reply-hint');
+                await ctx.editMessageText(addTimestamp(text, ctx.t, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
                 break;
             }
             case CallbackAction.Activities: {
                 const { activities } = await jules.getAllActivities(id);
                 const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
                 const keyboard = new InlineKeyboard();
-                let listText = `**Recent Activities**\nID: \`${id}\`\n\n`;
+                let listText = `${ctx.t('activities-title')}\nID: \`${id}\`\n\n`;
                 const items = filtered.slice(-5).reverse();
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
                 const emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'];
@@ -660,24 +737,24 @@ app.post('/webhook', async (c) => {
                     const time = new Date(a.createTime).toLocaleTimeString('en-GB', { timeZone: tz, hour12: false });
                     const originalIdx = filtered.length - 1 - i;
                     const emoji = emojis[i] || `${i + 1}`;
-                    listText += `${emoji} 🕒 ${time} **${getFriendlyType(type)}**\n${escapeMarkdown(getSummary(a, false))}\n\n`;
+                    listText += `${emoji} 🕒 ${time} **${getFriendlyType(type, ctx.t)}**\n${escapeMarkdown(getSummary(a, ctx.t, false))}\n\n`;
                     const cb = await getCallbackData(c.env, CallbackAction.ActivityDetail, id, originalIdx.toString());
                     keyboard.text(emoji, cb);
                 }
-                keyboard.row().text('🔙 Back', `${CallbackAction.ViewSession}:${id}`);
-                await ctx.editMessageText(addTimestamp(listText.substring(0, 4000), tz), { parse_mode: 'Markdown', reply_markup: keyboard });
+                keyboard.row().text(ctx.t('btn-back'), `${CallbackAction.ViewSession}:${id}`);
+                await ctx.editMessageText(addTimestamp(listText.substring(0, 4000), ctx.t, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
                 break;
             }
             case CallbackAction.ActivityDetail: {
                 const { activities } = await jules.getAllActivities(id);
                 const filtered = activities.filter((a) => getActivityType(a) !== 'PROGRESS_UPDATED');
                 const activity = filtered[parseInt(subId)];
-                if (!activity) return ctx.reply('Expired.');
+                if (!activity) return ctx.reply(ctx.t('msg-no-details'));
                 const type = getActivityType(activity);
-                const fullContent = `**Activity Detail**\n**ID:** \`${id}\`\n**Type:** ${getFriendlyType(type)}\n\n${escapeMarkdown(getSummary(activity, true))}`;
-                const keyboard = new InlineKeyboard().text('🔙 Back', `${CallbackAction.Activities}:${id}`);
+                const fullContent = `${ctx.t('activity-detail-title')}\n**ID:** \`${id}\`\n${ctx.t('activity-detail-type', { type: getFriendlyType(type, ctx.t) })}\n\n${escapeMarkdown(getSummary(activity, ctx.t, true))}`;
+                const keyboard = new InlineKeyboard().text(ctx.t('btn-back'), `${CallbackAction.Activities}:${id}`);
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
-                if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
+                if (fullContent.length <= 4000) await ctx.editMessageText(addTimestamp(fullContent, ctx.t, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
                 else {
                     await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
                     await ctx.reply('^ Full details above.', { reply_markup: keyboard });
@@ -687,15 +764,15 @@ app.post('/webhook', async (c) => {
             case CallbackAction.PlanView: {
                 const session = await jules.getSession(id);
                 const { activities } = await jules.getAllActivities(id);
-                const planText = formatPlan(activities);
+                const planText = formatPlan(activities, ctx.t);
                 const keyboard = new InlineKeyboard();
                 if (session.state === 'AWAITING_PLAN_APPROVAL') {
-                    keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${id}`).row();
+                    keyboard.text(ctx.t('btn-approve'), `${CallbackAction.ApprovePlan}:${id}`).row();
                 }
-                keyboard.text('⬅️ Back', `${CallbackAction.ViewSession}:${id}`);
-                const content = `📋 **Plan Details**\n**ID:** \`${id}\`\n\n${planText}`;
+                keyboard.text(ctx.t('btn-back'), `${CallbackAction.ViewSession}:${id}`);
+                const content = `${ctx.t('plan-details-title')}\n**ID:** \`${id}\`\n\n${planText}`;
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
-                if (content.length <= 4000) await ctx.editMessageText(addTimestamp(content, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
+                if (content.length <= 4000) await ctx.editMessageText(addTimestamp(content, ctx.t, tz), { parse_mode: 'Markdown', reply_markup: keyboard });
                 else {
                     await sendLongMessage(bot, ctx.chat!.id, content, { parse_mode: 'Markdown' });
                     await ctx.reply('^ Plan details above.', { reply_markup: keyboard });
@@ -708,13 +785,13 @@ app.post('/webhook', async (c) => {
             case CallbackAction.SessionsBack: {
                 const { sessions } = await jules.listSessions();
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
-                if (!sessions || sessions.length === 0) return ctx.editMessageText(addTimestamp('No active sessions.', tz));
+                if (!sessions || sessions.length === 0) return ctx.editMessageText(addTimestamp(ctx.t('sessions-none'), ctx.t, tz));
                 const keyboard = new InlineKeyboard();
                 sessions.slice(0, 10).forEach((s) => {
                     const id = s.name.split('/').pop() || 'unknown';
                     keyboard.text(`📝 ${s.title || s.displayName || id}`, `${CallbackAction.ViewSession}:${id}`).row();
                 });
-                await ctx.editMessageText(addTimestamp('Recent Sessions:', tz), { reply_markup: keyboard });
+                await ctx.editMessageText(addTimestamp(ctx.t('sessions-recent'), ctx.t, tz), { reply_markup: keyboard });
                 break;
             }
         }
@@ -733,6 +810,7 @@ app.post('/webhook', async (c) => {
     { command: "sessions", description: "Manage tasks" },
     { command: "new", description: "Create task" },
     { command: "cancel", description: "Cancel current wizard flow" },
+    { command: "lang", description: "Set language" },
     { command: "tz", description: "Set timezone" },
     { command: "check", description: "Diagnostics" },
     { command: "help", description: "Help" }
