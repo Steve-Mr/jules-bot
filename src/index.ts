@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { Bot, webhookCallback, InlineKeyboard, GrammyError, HttpError, Api, RawApi } from 'grammy';
+import { Bot, webhookCallback, InlineKeyboard, GrammyError, HttpError, Api, RawApi, CallbackQueryContext, Context as BotContext } from 'grammy';
 import { Env, JulesClient, CreateSessionOptions } from './lib/jules';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -390,7 +390,7 @@ app.post('/webhook', async (c) => {
     }
   });
 
-  const showRepoList = async (ctx: any, pageToken?: string) => {
+  const showRepoList = async (ctx: BotContext, pageToken?: string) => {
     try {
       const { sources, nextPageToken } = await jules.listSources({ pageSize: 8, pageToken });
       if (!sources || sources.length === 0) return ctx.reply('No repositories found.');
@@ -537,7 +537,7 @@ app.post('/webhook', async (c) => {
   });
 
   // 3. Callback Handlers
-  const approvePlan = async (ctx: any, sessionId: string) => {
+  const approvePlan = async (ctx: BotContext, sessionId: string) => {
     await jules.approvePlan(sessionId);
     await registerSession(c.env, jules, sessionId);
     const session = await jules.getSession(sessionId);
@@ -584,6 +584,7 @@ app.post('/webhook', async (c) => {
                 if (!source) return ctx.reply('Source not found.');
                 const branches = source.githubRepo?.branches?.map((b) => b.displayName) || ['main'];
                 const userId = ctx.from?.id;
+                if (!userId) return await ctx.reply('❌ Unable to identify user.');
                 const wizId = await saveWizardState(c.env, { source: targetRepo, startingBranch: 'main', branches, userId });
                 const keyboard = new InlineKeyboard();
                 branches.slice(0, 10).forEach((br: string, idx: number) => {
