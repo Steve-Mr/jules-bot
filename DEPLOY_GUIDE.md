@@ -6,15 +6,18 @@
 
 ## 1. 准备工作
 
-在开始部署之前，请收集以下必要信息：
+在开始部署之前，请完成以下准备工作：
 
-1.  **Telegram Bot Token**：联系 [@BotFather](https://t.me/botfather) 获取。
-2.  **Jules API Key**：在 [Jules 网页版设置](https://jules.google/) 中生成。
-3.  **Telegram User ID**：联系 [@userinfobot](https://t.me/userinfobot) 获取。
-4.  **Cloudflare Account ID**：
-    - 登录 Cloudflare 控制台。
-    - 进入 **Workers & Pages -> 概述**。
-    - 在页面右侧边栏可以找到 **Account ID**。
+1.  **获取令牌与 ID**：
+    - **Telegram Bot Token**：联系 [@BotFather](https://t.me/botfather) 获取。
+    - **Jules API Key**：在 [Jules 网页版设置](https://jules.google/) 中生成。
+    - **Telegram User ID**：联系 [@userinfobot](https://t.me/userinfobot) 获取。
+    - **Cloudflare Account ID**：在 Cloudflare 控制台的 **Workers & Pages -> 概述** 页面右侧查找。
+2.  **创建 KV 命名空间**：
+    - 在 Cloudflare Dashboard 中进入 **Workers & Pages -> KV**。
+    - 创建一个新的命名空间，建议命名为 `JULES_NOTIFICATIONS_KV`。记录下它的 **ID**。
+3.  **定义 Webhook 密钥 (可选但推荐)**：
+    - 自行生成一个随机字符串作为 `WEBHOOK_SECRET_TOKEN`（例如：`MySuperSecret123`）。这个密钥由你自主设置，用于确保 Webhook 请求仅来自 Telegram。
 
 ---
 
@@ -51,17 +54,19 @@
 
 ---
 
-## 3. 必选：配置 KV 存储与可选通知
+## 3. 完成环境变量配置
 
-本 Bot 依赖 Cloudflare KV 来处理 `/new` 向导流程、解决 Telegram 回调数据长度限制以及存储用户偏好。
+部署完成后，你需要在 Cloudflare Dashboard 的 Worker 设置中完成最后的配置：
 
-1.  **创建 KV**：在 Cloudflare Dashboard 创建一个 KV 命名空间，命名为 `JULES_NOTIFICATIONS_KV`。
-2.  **关联 ID**：
-    - **Actions 用户**：将得到的 ID 填入 GitHub Secret `JULES_KV_ID`。
-    - **命令行用户**：手动在 Cloudflare Dashboard 的 Worker 设置中绑定该 KV。
-3.  **设置定时器 (可选，仅用于主动通知)**：
-    - **Actions 用户**：设置 Secret `JULES_CRON`（如 `*/5 * * * *`）。
-    - **命令行用户**：在 Dashboard -> **Triggers** 手动添加。
+1.  **配置环境变量** (Settings -> Variables -> Environment Variables)：
+    - `TELEGRAM_TOKEN`: 你的 Bot Token。
+    - `JULES_API_KEY`: 你的 Jules API 密钥。
+    - `ADMIN_USER_ID`: 你的 Telegram 用户 ID（多个 ID 用英文逗号分隔）。
+    - `WEBHOOK_SECRET_TOKEN`: 你在准备阶段自主定义的密钥。
+2.  **绑定 KV** (Settings -> Variables -> KV Namespace Bindings)：
+    - 添加绑定，变量名为 `JULES_NOTIFICATIONS_KV`，选择你之前创建的命名空间。
+3.  **配置定时触发器 (可选)**：
+    - 如果需要主动通知功能，请在 **Triggers** 页面添加 Cron 触发器（例如 `*/5 * * * *`）。
 
 ---
 
