@@ -2,6 +2,7 @@ import { Context } from 'hono';
 
 export interface Env {
   TELEGRAM_TOKEN: string;
+  WEBHOOK_SECRET_TOKEN?: string;
   JULES_API_KEY: string;
   ADMIN_USER_ID: string; // Comma separated IDs
   JULES_NOTIFICATIONS_KV?: KVNamespace;
@@ -26,6 +27,39 @@ export interface Session {
   updateTime: string;
 }
 
+export interface PlanStep {
+  id: string;
+  index: number;
+  title: string;
+  description: string;
+}
+
+export interface Plan {
+  id: string;
+  steps: PlanStep[];
+  createTime: string;
+}
+
+export interface Artifact {
+  changeSet?: {
+    source: string;
+    gitPatch: {
+      baseCommitId: string;
+      unidiffPatch: string;
+      suggestedCommitMessage?: string;
+    };
+  };
+  bashOutput?: {
+    command: string;
+    output: string;
+    exitCode: number;
+  };
+  media?: {
+    mimeType: string;
+    data: string;
+  };
+}
+
 export interface Activity {
   name: string;
   id: string;
@@ -33,10 +67,14 @@ export interface Activity {
   originator: string;
   description: string;
   createTime: string;
-  planGenerated?: { plan: any };
+  artifacts?: Artifact[];
+  planGenerated?: { plan: Plan };
+  planApproved?: { planId: string };
   userMessaged?: { userMessage: string };
   agentMessaged?: { agentMessage: string };
-  progressUpdated?: { description: string };
+  progressUpdated?: { title?: string; description: string };
+  sessionCompleted?: Record<string, never>;
+  sessionFailed?: { reason: string };
 }
 
 export interface Source {

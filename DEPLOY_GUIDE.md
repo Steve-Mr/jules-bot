@@ -45,7 +45,9 @@
 1.  `npm install`
 2.  `npx wrangler login`
 3.  `npm run deploy`
-4.  **配置 Webhook**：访问 `https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<DOMAIN>/webhook`。
+4.  **配置 Webhook**：访问以下 URL 以关联 Bot 和服务，并启用安全验证：
+    `https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<DOMAIN>/webhook&secret_token=<YOUR_SECRET_TOKEN>`
+    *(注：`<YOUR_SECRET_TOKEN>` 应与你在环境变量中设置的 `WEBHOOK_SECRET_TOKEN` 一致)*
 
 ---
 
