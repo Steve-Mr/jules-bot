@@ -5,6 +5,8 @@ import { Env, JulesClient, CreateSessionOptions } from './lib/jules';
 const app = new Hono<{ Bindings: Env }>();
 
 const WIZARD_EXPIRATION_TTL = 1800; // 30 minutes
+const MERGE_THRESHOLD = 3500;
+const MERGE_WAIT_MS = 2000;
 
 const CallbackAction = {
     SetTimezone: 'set_tz',
@@ -476,10 +478,8 @@ app.post('/webhook', async (c) => {
   });
 
   // 2. Text Matcher (Conversational logic)
-  bot.on('message:text', async (ctx) => {
-    const text = ctx.message.text;
-    const replyTo = ctx.message.reply_to_message;
-    const replyText = replyTo?.text || replyTo?.caption || '';
+  const handleIncomingText = async (ctx: BotContext, text: string, replyText: string, mergeCount: number = 1) => {
+    const mergeHint = mergeCount > 1 ? `\n\n_(Merged ${mergeCount} segments)_` : '';
 
     // Pattern 1: Wizard Confirmation (Highest priority)
     // Robust regex to handle potential Markdown artifacts (**, `)
@@ -496,50 +496,104 @@ app.post('/webhook', async (c) => {
                 // Cleanup wizard state
                 await deleteWizardState(c.env, wizId, state.userId);
 
-                return ctx.reply(`🚀 Session started! ID: \`${sid}\` (Tracked)`);
+                return ctx.reply(`🚀 **Session started!**\nID: \`${sid}\` (Tracked)${mergeHint}`, { parse_mode: 'Markdown' });
             } catch (e: unknown) {
                 const errorMessage = e instanceof Error ? e.message : String(e);
-                return ctx.reply(`❌ Failed to create session: ${errorMessage}`);
+                return ctx.reply(`❌ **Failed to create session:** ${errorMessage}${mergeHint}`, { parse_mode: 'Markdown' });
             }
         } else {
-            return ctx.reply('⚠️ Wizard session expired or not found. Please start over with /new.');
+            return ctx.reply(`⚠️ Wizard session expired or not found. Please start over with /new.${mergeHint}`, { parse_mode: 'Markdown' });
         }
     }
 
     // Pattern 2: Normal reply to a session message
-    if (replyTo) {
-      // Use multiple patterns to robustly extract session ID.
-      // Use a negative lookbehind (?<!Wiz) to ensure we don't accidentally match WizID as a session ID.
-      // Prioritize ID: field, then generic "session <ID>", then fallback to Session:
-      const sidPatterns = [
+    // Use multiple patterns to robustly extract session ID.
+    // Use a negative lookbehind (?<!Wiz) to ensure we don't accidentally match WizID as a session ID.
+    // Prioritize ID: field, then generic "session <ID>", then fallback to Session:
+    const sidPatterns = [
         /(?<!Wiz)(?:\*\*|__)?ID(?:\*\*|__)?\s*[:：]\s*[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i,
         /(?<!Wiz)(?:\*\*|__)?ID(?:\*\*|__)?\s*(?:\*\*|__)?[:：](?:\*\*|__)?\s*[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i,
         /session\s+[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i,
         /(?<!Wiz)(?:\*\*|__)?Session(?:\*\*|__)?\s*[:：]\s*[`*_]*([0-9a-zA-Z._-]+)[`*_]*/i
-      ];
+    ];
 
-      let sessionId: string | null = null;
-      for (const p of sidPatterns) {
+    let sessionId: string | null = null;
+    for (const p of sidPatterns) {
         const match = replyText.match(p);
         if (match) {
-          sessionId = match[1];
-          break;
+            sessionId = match[1];
+            break;
         }
-      }
-
-      if (sessionId) {
-        try {
-          await jules.sendMessage(sessionId, text);
-          await registerSession(c.env, jules, sessionId);
-          return ctx.reply(`✅ Sent to session \`${sessionId}\`. (Now tracking)`, { reply_to_message_id: ctx.message.message_id });
-        } catch (e: unknown) {
-            const errorMessage = e instanceof Error ? e.message : String(e);
-            return ctx.reply(`❌ Failed to send: ${errorMessage}`);
-        }
-      }
     }
 
-    await ctx.reply('Use /help or reply to a session message to chat.');
+    if (sessionId) {
+        try {
+            await jules.sendMessage(sessionId, text);
+            await registerSession(c.env, jules, sessionId);
+            return ctx.reply(`✅ Sent to session \`${sessionId}\`. (Now tracking)${mergeHint}`, {
+                reply_to_message_id: ctx.msgId,
+                parse_mode: 'Markdown'
+            });
+        } catch (e: unknown) {
+            const errorMessage = e instanceof Error ? e.message : String(e);
+            return ctx.reply(`❌ Failed to send: ${errorMessage}${mergeHint}`, { parse_mode: 'Markdown' });
+        }
+    }
+
+    await ctx.reply(`Use /help or reply to a session message to chat.${mergeHint}`, { parse_mode: 'Markdown' });
+  };
+
+  bot.on('message:text', async (ctx) => {
+    const text = ctx.message.text;
+    const replyTo = ctx.message.reply_to_message;
+    const replyText = replyTo?.text || replyTo?.caption || '';
+    const userId = ctx.from?.id;
+    const replyToId = replyTo?.message_id;
+    const kv = c.env.JULES_NOTIFICATIONS_KV;
+
+    if (!replyToId || !userId || !kv) {
+        return await handleIncomingText(ctx, text, replyText);
+    }
+
+    const mergeKeyPrefix = `m:${userId}:${replyToId}`;
+    const lastKey = `${mergeKeyPrefix}:last`;
+    const chunksPrefix = `${mergeKeyPrefix}:c:`;
+    const inProgress = await kv.get(lastKey);
+
+    if (!inProgress && text.length < MERGE_THRESHOLD) {
+        return await handleIncomingText(ctx, text, replyText);
+    }
+
+    // Merging logic
+    const msgId = ctx.msgId;
+    const chunkKey = `${chunksPrefix}${msgId}`;
+    await kv.put(chunkKey, text, { expirationTtl: 600 });
+    await kv.put(lastKey, msgId.toString(), { expirationTtl: 600 });
+
+    c.executionCtx.waitUntil((async () => {
+        await new Promise(resolve => setTimeout(resolve, MERGE_WAIT_MS));
+        const lastId = await kv.get(lastKey);
+        if (lastId !== msgId.toString()) return; // Newer message arrived
+
+        // This is the last message, perform merge
+        const list = await kv.list({ prefix: chunksPrefix });
+
+        // Sorting is important. Telegram message IDs are increasing.
+        const sortedKeys = list.keys.sort((a, b) => {
+            const idA = parseInt(a.name.split(':').pop() || '0');
+            const idB = parseInt(b.name.split(':').pop() || '0');
+            return idA - idB;
+        });
+
+        const chunks = await Promise.all(sortedKeys.map(k => kv.get(k.name)));
+        const combinedText = chunks.filter(c => c !== null).join('');
+
+        await handleIncomingText(ctx, combinedText, replyText, chunks.length);
+
+        // Cleanup
+        await Promise.all(sortedKeys.map(k => kv.delete(k.name)));
+        await kv.delete(lastKey);
+    })());
   });
 
   // 3. Callback Handlers
