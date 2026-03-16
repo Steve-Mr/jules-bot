@@ -213,24 +213,27 @@ async function showActivityDetail(ctx: BotContext, bot: Bot, env: Env, sessionId
 }
 
 async function registerSession(env: Env, jules: JulesClient, sessionId: string, title?: string) {
-    if (!env.JULES_NOTIFICATIONS_KV) return;
-    const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
-    let registry: TrackedSession[] = raw ? JSON.parse(raw) : [];
+  if (!env.JULES_NOTIFICATIONS_KV) return;
+  const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
+  let registry: TrackedSession[] = raw ? JSON.parse(raw) : [];
 
-    // Prevent duplicate entries
-    if (!registry.find(s => s.id === sessionId)) {
-        let finalTitle = title;
-        if (!finalTitle) {
-            try {
-                const session = await jules.getSession(sessionId);
-                finalTitle = session.title || session.displayName || sessionId;
-            } catch {
-                finalTitle = sessionId;
-            }
-        }
-        registry.push({ id: sessionId, title: finalTitle!, createTime: Date.now() });
-        await env.JULES_NOTIFICATIONS_KV.put('track:registry', JSON.stringify(registry));
+  const existing = registry.find(s => s.id === sessionId);
+  if (existing) {
+    // Refresh interaction time to prevent race conditions with status checks
+    existing.createTime = Date.now();
+  } else {
+    let finalTitle = title;
+    if (!finalTitle) {
+      try {
+        const session = await jules.getSession(sessionId);
+        finalTitle = session.title || session.displayName || sessionId;
+      } catch {
+        finalTitle = sessionId;
+      }
     }
+    registry.push({ id: sessionId, title: finalTitle!, createTime: Date.now() });
+  }
+  await env.JULES_NOTIFICATIONS_KV.put('track:registry', JSON.stringify(registry));
 }
 
 // --- Scheduled & Tracking Tasks ---
@@ -258,8 +261,8 @@ export async function processTrackedSessions(env: Env, manual: boolean = false):
       // Cleanup old sessions (more than 24h)
       if (now - entry.createTime > DAY_MS) continue;
 
-      // For scheduled task, skip very new entries (< 1m) to avoid race conditions
-      if (!manual && (now - entry.createTime < 60000)) {
+      // Skip sessions interacted with less than 60s ago to allow API state to stabilize
+      if (now - entry.createTime < 60000) {
         updatedRegistry.push(entry);
         continue;
       }
