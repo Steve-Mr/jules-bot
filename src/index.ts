@@ -20,6 +20,7 @@ const CallbackAction = {
     ActivityDetail: 'act_idx',
     PlanView: 'plan_view',
     ApprovePlan: 'approve_do',
+    TrackSession: 'track_do',
     SessionsBack: 'sessions_back',
     ViewLatestActivity: 'view_latest',
 } as const;
@@ -210,6 +211,14 @@ async function showActivityDetail(ctx: BotContext, bot: Bot, env: Env, sessionId
         await sendLongMessage(bot, ctx.chat!.id, fullContent, { parse_mode: 'Markdown' });
         await ctx.reply('^ Full details above.', { reply_markup: keyboard });
     }
+}
+
+async function checkIsTracked(env: Env, sessionId: string): Promise<boolean> {
+    if (!env.JULES_NOTIFICATIONS_KV) return false;
+    const raw = await env.JULES_NOTIFICATIONS_KV.get('track:registry');
+    if (!raw) return false;
+    const registry: TrackedSession[] = JSON.parse(raw);
+    return registry.some(s => s.id === sessionId);
 }
 
 async function registerSession(env: Env, jules: JulesClient, sessionId: string, title?: string) {
@@ -745,6 +754,7 @@ app.post('/webhook', async (c) => {
             case CallbackAction.ViewSession: {
                 const session = await jules.getSession(id);
                 const title = session.title || session.displayName || id;
+                const isTracked = await checkIsTracked(c.env, id);
                 const keyboard = new InlineKeyboard();
                 if (session.state === 'AWAITING_PLAN_APPROVAL') {
                     keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${id}`).row();
@@ -752,6 +762,11 @@ app.post('/webhook', async (c) => {
                 } else if (session.state === 'AWAITING_USER_FEEDBACK') {
                     keyboard.text('💬 View Message', `${CallbackAction.ViewLatestActivity}:${id}`).row();
                 }
+
+                if (!isTracked) {
+                    keyboard.text('📡 Track Session', `${CallbackAction.TrackSession}:${id}`).row();
+                }
+
                 keyboard.text('🔄 Refresh', `${CallbackAction.ViewSession}:${id}`)
                         .text('📋 Activities', `${CallbackAction.Activities}:${id}`).row();
 
@@ -760,7 +775,8 @@ app.post('/webhook', async (c) => {
                 }
                 keyboard.text('🔙 List', CallbackAction.SessionsBack);
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
-                const text = addTimestamp(`**Session:** ${escapeMarkdown(title)}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, tz);
+                const trackingStatus = isTracked ? ' (Tracking: ✅)' : '';
+                const text = addTimestamp(`**Session:** ${escapeMarkdown(title)}${trackingStatus}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, tz);
                 await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
                 break;
             }
@@ -823,6 +839,32 @@ app.post('/webhook', async (c) => {
             case CallbackAction.ApprovePlan:
                 await approvePlan(ctx, id);
                 break;
+            case CallbackAction.TrackSession: {
+                const session = await jules.getSession(id);
+                const title = session.title || session.displayName || id;
+                await registerSession(c.env, jules, id, title);
+                // After tracking, refresh the session view to show tracking status and remove track button
+                const isTracked = true;
+                const keyboard = new InlineKeyboard();
+                if (session.state === 'AWAITING_PLAN_APPROVAL') {
+                    keyboard.text('👍 Approve Plan', `${CallbackAction.ApprovePlan}:${id}`).row();
+                    keyboard.text('📋 View Plan', `${CallbackAction.PlanView}:${id}`).row();
+                } else if (session.state === 'AWAITING_USER_FEEDBACK') {
+                    keyboard.text('💬 View Message', `${CallbackAction.ViewLatestActivity}:${id}`).row();
+                }
+
+                keyboard.text('🔄 Refresh', `${CallbackAction.ViewSession}:${id}`)
+                        .text('📋 Activities', `${CallbackAction.Activities}:${id}`).row();
+
+                if (session.state !== 'AWAITING_PLAN_APPROVAL') {
+                    keyboard.text('📋 View Plan', `${CallbackAction.PlanView}:${id}`);
+                }
+                keyboard.text('🔙 List', CallbackAction.SessionsBack);
+                const tz = await getUserTimezone(c.env, ctx.from?.id);
+                const text = addTimestamp(`✅ **Now tracking session!**\n\n**Session:** ${escapeMarkdown(title)} (Tracking: ✅)\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, tz);
+                await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+                break;
+            }
             case CallbackAction.SessionsBack: {
                 const { sessions } = await jules.listSessions();
                 const tz = await getUserTimezone(c.env, ctx.from?.id);
