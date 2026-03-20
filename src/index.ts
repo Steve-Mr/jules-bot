@@ -48,6 +48,7 @@ const Labels = {
     ViewPlan: '📋 View Plan',
     BackToList: '🔙 Back to List',
     LatestActivity: '📡 Latest Activity',
+    Home: '🏠 Main Menu',
 } as const;
 
 // --- Wizard & Registry Types ---
@@ -85,14 +86,19 @@ function getWizardKeyboard(options: string[] = []) {
         if ((idx + 1) % 2 === 0) kb.row();
     });
     if (options.length % 2 !== 0) kb.row();
-    return kb.text(Labels.Cancel).resized();
+    return kb.text(Labels.Cancel).text(Labels.Home).resized();
 }
 
-function getSessionViewKeyboard() {
-    return new Keyboard()
-        .text(Labels.Refresh).text(Labels.Activities).row()
-        .text(Labels.ViewPlan).text(Labels.BackToList).row()
-        .text(Labels.LatestActivity).resized();
+function getSessionViewKeyboard(session?: Session) {
+    const kb = new Keyboard();
+    if (session?.state === 'AWAITING_PLAN_APPROVAL') {
+        kb.text('👍 Approve Plan').row();
+    } else if (session?.state === 'AWAITING_USER_FEEDBACK') {
+        kb.text('💬 View Message').row();
+    }
+    return kb.text(Labels.Refresh).text(Labels.Activities).row()
+        .text(Labels.ViewPlan).text(Labels.LatestActivity).row()
+        .text(Labels.BackToList).text(Labels.Home).resized();
 }
 
 // --- Helpers ---
@@ -304,12 +310,14 @@ async function renderSessionView(ctx: BotContext, env: Env, session: Session, is
     const trackingStatus = isTracked ? ' (Tracking: ✅)' : '';
     const text = addTimestamp(`${prefixText}**Session:** ${escapeMarkdown(title)}${trackingStatus}\n**ID:** \`${id}\`\n**Status:** \`${session.state}\`\n\n💡 _Reply to chat._`, tz);
 
-    const replyKeyboard = getSessionViewKeyboard();
+    const replyKeyboard = getSessionViewKeyboard(session);
     if (env.JULES_NOTIFICATIONS_KV && ctx.from?.id) {
         await env.JULES_NOTIFICATIONS_KV.put(`active_session:${ctx.from.id}`, id, { expirationTtl: WIZARD_EXPIRATION_TTL });
     }
 
     if (ctx.callbackQuery?.message) {
+        // Only reply with the keyboard once to avoid cluttering.
+        // We'll use reply() here because editMessageText can't update the Reply Keyboard.
         await ctx.reply(`Viewing session: ${title}`, { reply_markup: replyKeyboard });
         await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
     } else {
@@ -473,17 +481,24 @@ app.post('/webhook', async (c) => {
     if (ctx.message?.text?.startsWith('/')) await ctx.reply('🚫 Unauthorized.');
   });
 
-  // 1. Commands
-  bot.command('start', (ctx) => ctx.reply('👋 I am Jules Bot.\n/status - Manual sync tracking\n/sessions - Manage tasks\n/new - Create task\n/cancel - Cancel wizard\n/tz - Set timezone\n/check - Diagnostics', {
-      reply_markup: getMainMenuKeyboard()
-  }));
+  // --- Command Logic ---
+  const cmdStart = async (ctx: BotContext) => {
+    if (c.env.JULES_NOTIFICATIONS_KV && ctx.from?.id) {
+        await Promise.all([
+            c.env.JULES_NOTIFICATIONS_KV.delete(`active_wiz:${ctx.from.id}`),
+            c.env.JULES_NOTIFICATIONS_KV.delete(`active_session:${ctx.from.id}`)
+        ]);
+    }
+    await ctx.reply('👋 I am Jules Bot.\n/status - Manual sync tracking\n/sessions - Manage tasks\n/new - Create task\n/cancel - Cancel wizard\n/tz - Set timezone\n/check - Diagnostics', {
+        reply_markup: getMainMenuKeyboard()
+    });
+  };
 
-  bot.command('tz', async (ctx) => {
+  const cmdTz = async (ctx: BotContext, arg?: string) => {
       if (!c.env.JULES_NOTIFICATIONS_KV) {
           return await ctx.reply('❌ **Cloudflare KV not configured.**\n\nTimezone settings require a KV binding to store your preferences.', { parse_mode: 'Markdown' });
       }
 
-      const arg = ctx.match?.trim();
       if (arg) {
           try {
               // Validate timezone
@@ -510,16 +525,17 @@ app.post('/webhook', async (c) => {
           reply_markup: keyboard
       });
       await ctx.reply('Use bottom keyboard to navigate:', { reply_markup: getMainMenuKeyboard() });
-  });
+  };
 
-  bot.command('status', async (ctx) => {
+  const cmdStatus = async (ctx: BotContext) => {
+    if (!ctx.chat) return;
     const waitMsg = await ctx.reply('🔄 Checking tracked sessions...');
     const { checked, updated } = await processTrackedSessions(c.env, true);
     const tz = await getUserTimezone(c.env, ctx.from?.id);
     await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, addTimestamp(`✅ **Status Check Complete**\n\n- Sessions checked: \`${checked}\`\n- Notifications sent to admins: \`${updated}\`\n\n_Milestone sessions have been removed from the tracking list._`, tz), { parse_mode: 'Markdown' });
-  });
+  };
 
-  bot.command('check', async (ctx) => {
+  const cmdCheck = async (ctx: BotContext) => {
       let report = "🛠 **System Check**\n\n";
       const userId = ctx.from?.id;
       report += `✅ Admin ID: \`${userId || 'unknown'}\`\n`;
@@ -550,9 +566,9 @@ app.post('/webhook', async (c) => {
           report += `❌ API: Failed (${errorMessage})\n`;
       }
       await ctx.reply(report, { parse_mode: 'Markdown' });
-  });
+  };
 
-  bot.command('sessions', async (ctx) => {
+  const cmdSessions = async (ctx: BotContext) => {
     try {
       const { sessions } = await jules.listSessions();
       if (!sessions || sessions.length === 0) return ctx.reply('No active sessions.');
@@ -567,7 +583,7 @@ app.post('/webhook', async (c) => {
         const errorMessage = e instanceof Error ? e.message : String(e);
         await ctx.reply(`❌ Error: ${errorMessage}`);
     }
-  });
+  };
 
   const showRepoList = async (ctx: BotContext, pageToken?: string) => {
     try {
@@ -602,20 +618,31 @@ app.post('/webhook', async (c) => {
     }
   };
 
-  bot.command('new', async (ctx) => {
+  const cmdNew = async (ctx: BotContext) => {
     if (!c.env.JULES_NOTIFICATIONS_KV) {
         return await ctx.reply('❌ **Cloudflare KV not configured.**\n\nThe `/new` command and interactive wizard require a KV binding to store temporary session states and handle long identifiers. Please refer to the deployment guide to configure `JULES_NOTIFICATIONS_KV`.', { parse_mode: 'Markdown' });
     }
     return await showRepoList(ctx);
-  });
+  };
 
-  bot.command('cancel', async (ctx) => {
+  const cmdCancel = async (ctx: BotContext) => {
       if (!c.env.JULES_NOTIFICATIONS_KV) return ctx.reply('❌ KV not configured.');
       const userId = ctx.from?.id;
       if (!userId) return ctx.reply('❌ Unable to identify user.');
       await clearUserWizards(c.env, userId);
-      await ctx.reply('✅ All ongoing /new wizard flows have been cancelled.');
-  });
+      await ctx.reply('✅ All ongoing /new wizard flows have been cancelled.', {
+          reply_markup: getMainMenuKeyboard()
+      });
+  };
+
+  // 1. Commands
+  bot.command('start', cmdStart);
+  bot.command('tz', (ctx) => cmdTz(ctx, ctx.match?.trim()));
+  bot.command('status', cmdStatus);
+  bot.command('check', cmdCheck);
+  bot.command('sessions', cmdSessions);
+  bot.command('new', cmdNew);
+  bot.command('cancel', cmdCancel);
 
   bot.command('reply', async (ctx) => {
     const match = ctx.message?.text?.match(/\/reply\s+([^\s]+)\s+(.+)/);
@@ -698,6 +725,9 @@ app.post('/webhook', async (c) => {
 
                 // Cleanup wizard state
                 await deleteWizardState(c.env, wizId, state.userId);
+                if (c.env.JULES_NOTIFICATIONS_KV && state.userId) {
+                    await c.env.JULES_NOTIFICATIONS_KV.put(`active_session:${state.userId}`, sid, { expirationTtl: WIZARD_EXPIRATION_TTL });
+                }
 
                 return ctx.reply(`🚀 **Session started!**\nID: \`${sid}\` (Tracked)${mergeHint}`, {
                     parse_mode: 'Markdown',
@@ -755,70 +785,76 @@ app.post('/webhook', async (c) => {
     // Handle Reply Keyboard buttons
     switch (text) {
         case Labels.NewSession:
-            return await showRepoList(ctx);
+            return await cmdNew(ctx);
         case Labels.ListSessions:
-            ctx.update.message!.text = '/sessions';
-            return await bot.handleUpdate(ctx.update);
+            return await cmdSessions(ctx);
         case Labels.SyncStatus:
-            ctx.update.message!.text = '/status';
-            return await bot.handleUpdate(ctx.update);
+            return await cmdStatus(ctx);
         case Labels.SetTimezone:
-            ctx.update.message!.text = '/tz';
-            return await bot.handleUpdate(ctx.update);
+            return await cmdTz(ctx);
         case Labels.Check:
-            ctx.update.message!.text = '/check';
-            return await bot.handleUpdate(ctx.update);
+            return await cmdCheck(ctx);
+        case Labels.Home:
+            return await cmdStart(ctx);
         case Labels.Cancel:
-            await clearUserWizards(c.env, ctx.from!.id);
-            return await ctx.reply('✅ Cancelled.', { reply_markup: getMainMenuKeyboard() });
+            return await cmdCancel(ctx);
         case Labels.SearchRepo:
             return await ctx.reply('Enter repository name keyword to search:', { reply_markup: { force_reply: true } });
         case Labels.InteractiveMode: {
             const wizId = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_wiz:${ctx.from!.id}`);
             if (wizId) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.WizardMode}:${wizId}:int` } } as any);
-            return await ctx.reply('Wizard session expired.');
+            return await ctx.reply('Wizard session expired.', { reply_markup: getMainMenuKeyboard() });
         }
         case Labels.AutoMode: {
             const wizId = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_wiz:${ctx.from!.id}`);
             if (wizId) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.WizardMode}:${wizId}:auto` } } as any);
-            return await ctx.reply('Wizard session expired.');
+            return await ctx.reply('Wizard session expired.', { reply_markup: getMainMenuKeyboard() });
         }
         case Labels.Yes: {
             const wizId = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_wiz:${ctx.from!.id}`);
             if (wizId) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.WizardPR}:${wizId}:yes` } } as any);
-            return await ctx.reply('Wizard session expired.');
+            return await ctx.reply('Wizard session expired.', { reply_markup: getMainMenuKeyboard() });
         }
         case Labels.No: {
             const wizId = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_wiz:${ctx.from!.id}`);
             if (wizId) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.WizardPR}:${wizId}:no` } } as any);
-            return await ctx.reply('Wizard session expired.');
+            return await ctx.reply('Wizard session expired.', { reply_markup: getMainMenuKeyboard() });
         }
         case Labels.Refresh: {
             const sid = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_session:${ctx.from!.id}`);
             if (sid) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.ViewSession}:${sid}` } } as any);
-            return await ctx.reply('No active session.');
+            return await ctx.reply('No active session.', { reply_markup: getMainMenuKeyboard() });
         }
         case Labels.Activities: {
             const sid = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_session:${ctx.from!.id}`);
             if (sid) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.Activities}:${sid}` } } as any);
-            return await ctx.reply('No active session.');
+            return await ctx.reply('No active session.', { reply_markup: getMainMenuKeyboard() });
         }
         case Labels.ViewPlan: {
             const sid = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_session:${ctx.from!.id}`);
             if (sid) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.PlanView}:${sid}` } } as any);
-            return await ctx.reply('No active session.');
+            return await ctx.reply('No active session.', { reply_markup: getMainMenuKeyboard() });
         }
         case Labels.LatestActivity: {
             const sid = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_session:${ctx.from!.id}`);
             if (sid) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.ViewLatestActivity}:${sid}` } } as any);
-            return await ctx.reply('No active session.');
+            return await ctx.reply('No active session.', { reply_markup: getMainMenuKeyboard() });
+        }
+        case '👍 Approve Plan': {
+            const sid = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_session:${ctx.from!.id}`);
+            if (sid) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.ApprovePlan}:${sid}` } } as any);
+            return await ctx.reply('No active session.', { reply_markup: getMainMenuKeyboard() });
+        }
+        case '💬 View Message': {
+            const sid = await c.env.JULES_NOTIFICATIONS_KV?.get(`active_session:${ctx.from!.id}`);
+            if (sid) return await bot.handleUpdate({ ...ctx.update, callback_query: { id: '0', from: ctx.from!, chat_instance: '0', data: `${CallbackAction.ViewLatestActivity}:${sid}` } } as any);
+            return await ctx.reply('No active session.', { reply_markup: getMainMenuKeyboard() });
         }
         case Labels.BackToList:
             if (c.env.JULES_NOTIFICATIONS_KV && ctx.from?.id) {
                 await c.env.JULES_NOTIFICATIONS_KV.delete(`active_session:${ctx.from.id}`);
             }
-            ctx.update.message!.text = '/sessions';
-            return await bot.handleUpdate(ctx.update);
+            return await cmdSessions(ctx);
     }
 
     // Handle dynamic Branch buttons in wizard
