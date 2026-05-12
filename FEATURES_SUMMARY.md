@@ -87,3 +87,64 @@ Telegram 原生限制 Inline Keyboard 的 callback_data 最长只有 **64 字节
 *   **Emoji 与标签系统**: 使用字典结构将冰冷的 API 类型转换为带有情感色彩的视觉元素（例如：`SESSION_COMPLETED` 被渲染为 `🎉 Task Completed`）。
 *   **Markdown 安全转换 (`escapeMarkdown`)**: 在进行 Markdown V2 的富文本渲染时，针对包含动态内容的输入进行了严格的安全转义（例如 `_`, `*`, `` ` ``, `[`），预防产生 Telegram UI 解析失败（HTTP 400）。
 *   **时间戳本地化**: 系统支持用户的个性化时区偏好，并在关键信息底部统一采用友好的 `🕒 Last updated: HH:mm:ss (Timezone)` 脚标，使用户对任务进展一目了然。
+
+---
+
+## 七、Cloudflare KV 的全景式应用解析
+
+由于 Cloudflare Workers 是无状态的 Serverless 环境，本项目将 **Cloudflare KV** 视为整个系统的状态引擎与内存总线，主要涵盖了以下六大维度的深度应用：
+
+1.  **用户偏好存储 (`tz:{userId}`)**
+    *   **作用**: 持久化用户的时区设置（如 `Asia/Shanghai`）。
+    *   **机制**: 简单键值对，无过期时间。
+
+2.  **长 Callback Data 压缩与映射 (`cb:{shortId}`)**
+    *   **作用**: 突破 Telegram 强加的 64 bytes 回调数据长度限制。
+    *   **机制**: 当底层参数拼装后超长时，系统拦截并随机生成一个 6 字符的 `shortId`。将原本的超长字符串作为 Value 存入 KV，过期时间 (TTL) 设为 3600 秒（1 小时）。UI 层下发形如 `cb_map:{shortId}` 的简短标识，点击回调时在中间件层进行逆向解析，实现对开发者的透明化扩展。
+
+3.  **多步表单状态驻留 (`wiz:{wizId}`)**
+    *   **作用**: 支撑 `/new` 向导的多步流转（仓库 -> 分支 -> 模式 -> PR）。
+    *   **机制**: 序列化 JSON 存储 `WizardState` 对象。每一次用户点击下一步，都会携带当前的 `wizId`，系统读取老状态，追加新属性，再保存回 KV。TTL 统一为 30 分钟。
+
+4.  **防并发与用户会话清理 (`uwiz:{userId}:{wizId}`)**
+    *   **作用**: 实现 `/cancel` 的批量清理能力。
+    *   **机制**: 基于前缀的辅助索引结构。每次创建新的 `wiz` 时，同步写入带有用户 ID 前缀的映射键。`/cancel` 触发时利用 `KV.list({ prefix })` 扫出该用户所有的暂存会话并执行批量 `Promise.all` 删除，杜绝脏数据。
+
+5.  **主动追踪与广播注册表 (`track:registry`)**
+    *   **作用**: 实现会话生命周期的异步状态监控与管理员广播机制。
+    *   **机制**: 单 Key 存储整个序列化的 JSON 数组，记录所有正在运行任务的 `sessionId`, `title`, 和 `createTime`（最后交互时间）。通过定时任务 (Cron/Scheduled) 定期提取进行比对轮询，并在触发终端状态时自我净化（Remove）。
+
+6.  **防抖与长消息合并缓冲池 (`m:{userId}:{replyToId}:*`)**
+    *   **作用**: 应对 Telegram 发送超过 3500 字符文本时的强制物理截断。
+    *   **机制**:
+        *   碎片池 (`m:...:c:{msgId}`): 暂存被截断的零碎文本。
+        *   锁存器 (`m:...:last`): 记录最后到达的区块 ID。
+        *   通过 `waitUntil` 异步挂起 2 秒（模拟事件总线防抖）。期满后通过前缀拉取所有碎片，依照 ID 升序拼接为一整段文字交由主逻辑处理。
+
+---
+
+## 八、Telegram API 机制的深度融合
+
+本项目在交互设计上并未停留在简单的“一问一答”层面，而是深入利用了 Telegram 的多种高级机制：
+
+1.  **ForceReply 强制引导机制**
+    *   在 `/new` 向导进行到最后一步（要求输入 Prompt）时，下发的 Message 会携带 `reply_markup: { force_reply: true }`。这会让用户的输入框自动弹起并强制引用该条消息。这一设计配合消息中的隐藏 `WizID`，使得服务端能 100% 准确地将自然语言归属于特定的向导上下文中。
+
+2.  **正则上下文提取与免 ID 交互**
+    *   支持用户以极其自然的体验回复 (Reply) Bot。系统利用了严谨的多重正则表达式（含负向零宽断言 `(?<!Wiz)` 避免 ID 碰撞），从历史引用的气泡文本中精确提取 `Session ID`。无需用户记忆或复制任何晦涩的系统标识符。
+
+3.  **状态机驱动的 Inline Keyboard**
+    *   Bot 核心 UI 构建在内联键盘上，通过统一定义 `CallbackAction` 常量字典消除魔法字符串。按钮不单纯是超链接，而是充当了状态机的 Trigger，点击后系统会利用 `editMessageText` 在原气泡内原地刷新 UI 与进度（消除重绘和刷屏感），提供类似 App 的体验。
+
+4.  **Grammy 全局异常拦截与过滤**
+    *   捕获了未捕获的 Rejection 与 API Error。特别是针对因内容未改变而重复提交 `editMessageText` 导致的特有报错 (`message is not modified`)，实现了定制化过滤，避免了无意义的日志噪音。
+
+---
+
+## 九、核心工程亮点与创新总结
+
+总体而言，本代码库展示了以下几个突出的工程亮点：
+
+*   **真正的 Serverless 弹性架构**：所有的长时等待（如防抖合并）、状态流转（向导缓存）、异步推送（定时检查），全部被巧妙地降维并映射到了 Cloudflare KV 与原生 Worker 特性 (`waitUntil`) 之上。无需部署 Redis、数据库或长连接服务器，极大降低了运维成本。
+*   **极致的防御性编程 (Defensive Programming)**：从数据入口到呈现层处处设防。针对 API 解析有完整的 `try...catch`；针对 KV 获取有默认回退 (Fallback) 值；针对 Markdown 解析有 `escapeMarkdown` 兜底；严格避免了针对 `ctx.from` 和 `ctx.chat` 的非空断言，确保服务在边界条件下的强韧性。
+*   **降噪与聚焦的产品体验**：在 Activity 列表中过滤掉海量无意义的 `PROGRESS_UPDATED` 轮询噪音；针对成功/失败采用友好的短语兜底 (`sessionCompleted` 映射)；针对文本溢出进行智能分片 (`sendLongMessage`)。一切技术实现均服务于“极简、可控”的用户体验。
